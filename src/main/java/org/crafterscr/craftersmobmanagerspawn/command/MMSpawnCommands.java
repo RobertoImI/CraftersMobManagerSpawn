@@ -18,13 +18,26 @@ import org.crafterscr.craftersmobmanagerspawn.data.SpawnZone;
 import org.crafterscr.craftersmobmanagerspawn.logic.MMSpawnManager;
 import org.crafterscr.craftersmobmanagerspawn.util.HeightMode;
 
+/**
+ * Registra y ejecuta todos los comandos del mod.
+ *
+ * Todos los comandos cuelgan de /mmspawn y están limitados a OP/admin
+ * usando source.hasPermission(2).
+ */
 public class MMSpawnCommands {
 
+    /**
+     * Evento de NeoForge que permite registrar comandos del servidor.
+     */
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         register(event.getDispatcher());
     }
 
+    /**
+     * Construye el árbol completo de comandos.
+     * Aquí se definen subcomandos, argumentos y autocompletados.
+     */
     private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         dispatcher.register(
                 Commands.literal("mmspawn")
@@ -146,6 +159,8 @@ public class MMSpawnCommands {
                                                         IntegerArgumentType.getInteger(context, "value")
                                                 )))))
 
+                        // emptyDelay deja una sola espera antes de reponer mobs.
+// La zona debe estar vacía este tiempo antes de reponer mobs.
                         .then(Commands.literal("emptyDelay")
                                 .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
@@ -156,6 +171,7 @@ public class MMSpawnCommands {
                                                         IntegerArgumentType.getInteger(context, "seconds")
                                                 )))))
 
+                        // spawnInterval controla el respawn progresivo: 1 mob cada X segundos.
                         .then(Commands.literal("spawnInterval")
                                 .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
@@ -184,6 +200,7 @@ public class MMSpawnCommands {
                                                 false
                                         ))))
 
+                        // show ahora puede recibir segundos: /mmspawn show <id> [segundos].
                         .then(Commands.literal("show")
                                 .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
@@ -241,6 +258,7 @@ public class MMSpawnCommands {
         );
     }
 
+    /** Crea una zona nueva. Si lo ejecuta un jugador, también guarda su posición como centro. */
     private static int create(CommandSourceStack source, String id) {
         if (MMSpawnManager.exists(id)) {
             fail(source, "Ya existe una zona con el ID: " + id);
@@ -263,6 +281,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Elimina completamente una zona y sus mobs asociados. */
     private static int delete(CommandSourceStack source, String id) {
         boolean deleted = MMSpawnManager.deleteZone(source.getServer(), id);
 
@@ -275,6 +294,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Muestra todos los IDs de zonas creadas. */
     private static int list(CommandSourceStack source) {
         if (MMSpawnManager.getZoneIds().isEmpty()) {
             success(source, "No hay zonas creadas.");
@@ -285,6 +305,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Muestra información rápida de una zona. */
     private static int info(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -309,6 +330,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Guarda como centro de la zona la posición actual del jugador. */
     private static int center(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -332,6 +354,7 @@ public class MMSpawnCommands {
         }
     }
 
+    /** Cambia el radio horizontal de la zona. */
     private static int setRadius(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -346,6 +369,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Cambia la altura mínima permitida para la zona. */
     private static int setYMin(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -360,6 +384,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Cambia la altura máxima permitida para la zona. */
     private static int setYMax(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -374,6 +399,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Cambia el modo de altura: ground, floor, exact o air. */
     private static int setHeightMode(CommandSourceStack source, String id, String modeText) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -389,6 +415,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Agrega un mob posible a la zona con su peso de aparición. */
     private static int mobAdd(CommandSourceStack source, String id, ResourceLocation entityId, int weight) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -403,6 +430,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Quita un mob específico de la lista de mobs posibles de la zona. */
     private static int mobRemove(CommandSourceStack source, String id, ResourceLocation entityId) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -417,6 +445,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Limpia todos los mobs configurados en la zona. No elimina mobs vivos; para eso está /mmspawn clear. */
     private static int mobClear(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -431,6 +460,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Define cuántos mobs vivos como máximo puede mantener la zona. */
     private static int setMax(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -445,6 +475,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Define cuántos segundos debe estar vacía la zona antes de reponer mobs. */
     private static int setEmptyDelay(CommandSourceStack source, String id, int seconds) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -459,6 +490,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Define cada cuántos segundos aparece un mob durante el respawn progresivo. */
     private static int setSpawnInterval(CommandSourceStack source, String id, int seconds) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -473,6 +505,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Activa o detiene una zona. */
     private static int setActive(CommandSourceStack source, String id, boolean active) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -487,6 +520,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Muestra centro, radio y puntos manuales con partículas por varios segundos. */
     private static int show(CommandSourceStack source, String id, int seconds) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -506,6 +540,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Teletransporta al admin al centro de una zona. */
     private static int teleport(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -532,6 +567,7 @@ public class MMSpawnCommands {
         }
     }
 
+    /** Agrega la posición actual del jugador como punto manual de aparición. */
     private static int pointAdd(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -555,6 +591,7 @@ public class MMSpawnCommands {
         }
     }
 
+    /** Elimina todos los puntos manuales de una zona. */
     private static int pointClear(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -569,6 +606,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Elimina los mobs vivos asociados a una zona, pero no borra la zona. */
     private static int clearActive(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -581,6 +619,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Fuerza el respawn hasta llenar la zona al máximo configurado. */
     private static int force(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -600,6 +639,7 @@ public class MMSpawnCommands {
         return 1;
     }
 
+    /** Busca una zona; si no existe, envía un error al admin. */
     private static SpawnZone getZoneOrFail(CommandSourceStack source, String id) {
         SpawnZone zone = MMSpawnManager.getZone(id);
 
@@ -611,10 +651,12 @@ public class MMSpawnCommands {
         return zone;
     }
 
+    /** Mensaje verde de éxito para comandos. */
     private static void success(CommandSourceStack source, String message) {
         source.sendSuccess(() -> Component.literal("§a[MMSpawn] §f" + message), false);
     }
 
+    /** Mensaje rojo de error para comandos. */
     private static void fail(CommandSourceStack source, String message) {
         source.sendFailure(Component.literal("§c[MMSpawn] §f" + message));
     }

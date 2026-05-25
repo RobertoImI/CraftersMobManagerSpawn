@@ -34,18 +34,35 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.UUID;
 
+/**
+ * Clase central del sistema de spawn.
+ *
+ * Aquí se guardan las zonas en memoria, se cargan/guardan desde JSON,
+ * se ejecuta el tick del servidor, se controla el respawn progresivo,
+ * se etiquetan mobs del mod y se muestran partículas temporales.
+ */
 public class MMSpawnManager {
 
+    // Todas las zonas cargadas, organizadas por ID.
     private static final Map<String, SpawnZone> ZONES = new LinkedHashMap<>();
+    // Tareas temporales para mostrar partículas por varios segundos.
     private static final Map<String, VisualTask> VISUAL_TASKS = new LinkedHashMap<>();
 
+    // Random compartido para elegir mobs, posiciones y pesos.
     private static final Random RANDOM = new Random();
 
+    // Etiqueta general que se agrega a todo mob creado por este mod.
     private static final String MANAGED_TAG = "mmspawn_managed";
 
+    // Referencia al servidor actual. Se usa para guardar el JSON desde otros métodos.
     private static MinecraftServer currentServer;
+
+    // Contador simple para ejecutar la lógica pesada una vez por segundo y no cada tick.
     private static int tickCounter = 0;
 
+    /**
+     * Cuando el servidor termina de iniciar, cargamos las zonas desde el JSON.
+     */
     @SubscribeEvent
     public static void onServerStarted(ServerStartedEvent event) {
         currentServer = event.getServer();
@@ -54,6 +71,9 @@ public class MMSpawnManager {
         VISUAL_TASKS.clear();
     }
 
+    /**
+     * Antes de apagar el servidor, guardamos las zonas actuales en JSON.
+     */
     @SubscribeEvent
     public static void onServerStopping(ServerStoppingEvent event) {
         if (currentServer != null) {
@@ -65,6 +85,10 @@ public class MMSpawnManager {
         VISUAL_TASKS.clear();
     }
 
+    /**
+     * Tick del servidor.
+     * El juego corre a 20 ticks por segundo, pero este sistema trabaja una vez por segundo.
+     */
     @SubscribeEvent
     public static void onServerTick(ServerTickEvent.Post event) {
         MinecraftServer server = event.getServer();
@@ -84,6 +108,17 @@ public class MMSpawnManager {
         tickVisualTasks(server);
     }
 
+    /**
+     * Lógica principal de una zona.
+     *
+     * Flujo:
+     * 1. Si la zona está detenida, no hace nada.
+     * 2. Re-sincroniza mobs con etiquetas del mod.
+     * 3. Limpia UUIDs de mobs muertos.
+     * 4. Si hay jugadores dentro, cancela el contador de zona vacía.
+     * 5. Si la zona está vacía, espera emptyDelay.
+     * 6. Después repone mobs faltantes poco a poco según spawnInterval.
+     */
     private static void tickZone(MinecraftServer server, SpawnZone zone) {
         if (!zone.isActive()) {
             return;
@@ -133,10 +168,17 @@ public class MMSpawnManager {
             return;
         }
 
-        spawnOneMob(level, zone);
-        zone.setLastSpawnTick(gameTime);
+        boolean spawned = spawnOneMob(level, zone);
+
+        // Solo actualizamos el intervalo si realmente se pudo crear un mob.
+        if (spawned) {
+            zone.setLastSpawnTick(gameTime);
+        }
     }
 
+    /**
+     * Mantiene visibles las partículas de /mmspawn show <id> <segundos>.
+     */
     private static void tickVisualTasks(MinecraftServer server) {
         Iterator<Map.Entry<String, VisualTask>> iterator = VISUAL_TASKS.entrySet().iterator();
 
@@ -167,6 +209,9 @@ public class MMSpawnManager {
         }
     }
 
+    /**
+     * Guarda manualmente todas las zonas en el JSON.
+     */
     public static void save() {
         if (currentServer != null) {
             MMSpawnStorage.save(currentServer, ZONES);
@@ -192,6 +237,9 @@ public class MMSpawnManager {
                 .toList();
     }
 
+    /**
+     * Crea una zona nueva en memoria y luego la guarda en JSON.
+     */
     public static SpawnZone createZone(String id) {
         String cleanId = id.toLowerCase();
 
@@ -202,6 +250,10 @@ public class MMSpawnManager {
         return zone;
     }
 
+    /**
+     * Elimina una zona completamente.
+     * También borra los mobs vivos asociados a esa zona usando UUIDs y etiquetas.
+     */
     public static boolean deleteZone(MinecraftServer server, String id) {
         SpawnZone zone = getZone(id);
 
@@ -217,6 +269,13 @@ public class MMSpawnManager {
         return true;
     }
 
+    /**
+     * Elimina del mundo todos los mobs activos asociados a una zona.
+     *
+     * Usa dos sistemas:
+     * - UUIDs registrados en memoria.
+     * - Etiquetas persistentes en los mobs, útil después de reinicios.
+     */
     public static void clearActiveMobs(MinecraftServer server, SpawnZone zone) {
         ServerLevel level = getLevel(server, zone);
 
@@ -240,6 +299,10 @@ public class MMSpawnManager {
         zone.getActiveMobUuids().clear();
     }
 
+    /**
+     * Fuerza el respawn hasta llenar la zona al máximo permitido.
+     * Respeta maxAlive, pesos, puntos manuales y modo de altura.
+     */
     public static int forceRespawn(ServerLevel level, SpawnZone zone) {
         syncTaggedMobs(level, zone);
         cleanupDeadMobs(level, zone);
@@ -259,6 +322,10 @@ public class MMSpawnManager {
         return spawned;
     }
 
+    /**
+     * Crea un solo mob de la zona.
+     * El mob se elige por peso y se etiqueta para reconocerlo después.
+     */
     private static boolean spawnOneMob(ServerLevel level, SpawnZone zone) {
         SpawnMobEntry entry = pickWeightedMob(zone);
 
@@ -293,6 +360,7 @@ public class MMSpawnManager {
                 0.0F
         );
 
+        // Etiquetas persistentes. Sirven para limpiar/reconocer mobs incluso después de reiniciar.
         entity.addTag(MANAGED_TAG);
         entity.addTag(getZoneTag(zone));
 
@@ -309,6 +377,10 @@ public class MMSpawnManager {
         return added;
     }
 
+    /**
+     * Elige un mob según su peso.
+     * Peso alto = más probabilidad de salir.
+     */
     private static SpawnMobEntry pickWeightedMob(SpawnZone zone) {
         int totalWeight = 0;
 
@@ -334,13 +406,23 @@ public class MMSpawnManager {
         return zone.getMobs().getFirst();
     }
 
+    /**
+     * Decide la posición final del spawn.
+     *
+     * Si hay puntos manuales, intenta usarlos primero.
+     * Si no hay puntos manuales, busca una posición aleatoria dentro del radio
+     * usando el modo de altura configurado.
+     */
     private static BlockPos chooseSpawnPos(ServerLevel level, SpawnZone zone) {
         if (!zone.getManualPoints().isEmpty()) {
-            SpawnPointData point = zone.getManualPoints().get(RANDOM.nextInt(zone.getManualPoints().size()));
-            BlockPos manual = point.toBlockPos();
+            // Probamos varios puntos manuales por si uno está bloqueado.
+            for (int attempt = 0; attempt < Math.min(20, zone.getManualPoints().size()); attempt++) {
+                SpawnPointData point = zone.getManualPoints().get(RANDOM.nextInt(zone.getManualPoints().size()));
+                BlockPos manual = point.toBlockPos();
 
-            if (isSpawnSpaceValid(level, manual)) {
-                return manual;
+                if (isSpawnSpaceValid(level, manual)) {
+                    return manual;
+                }
             }
 
             return null;
@@ -374,6 +456,10 @@ public class MMSpawnManager {
         return null;
     }
 
+    /**
+     * EXACT: usa exactamente la altura del centro de la zona.
+     * Ideal para bosses o spawns muy controlados.
+     */
     private static BlockPos findExactPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int y = clamp((int) Math.round(zone.getCenterY()), zone.getYMin(), zone.getYMax());
         BlockPos pos = new BlockPos(x, y, z);
@@ -385,6 +471,10 @@ public class MMSpawnManager {
         return null;
     }
 
+    /**
+     * GROUND: busca desde arriba hacia abajo hasta encontrar suelo sólido.
+     * Ideal para exteriores, bosques, campos o zonas naturales.
+     */
     private static BlockPos findGroundPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int min = Math.min(zone.getYMin(), zone.getYMax());
         int max = Math.max(zone.getYMin(), zone.getYMax());
@@ -401,6 +491,10 @@ public class MMSpawnManager {
         return null;
     }
 
+    /**
+     * FLOOR: busca un suelo cerca de la altura central de la zona.
+     * Ideal para interiores, pisos de mazmorras, torres o edificios.
+     */
     private static BlockPos findFloorPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int centerY = (int) Math.round(zone.getCenterY());
 
@@ -422,6 +516,10 @@ public class MMSpawnManager {
         return null;
     }
 
+    /**
+     * AIR: busca un espacio libre aleatorio dentro del rango Y.
+     * Ideal para mobs voladores.
+     */
     private static BlockPos findAirPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int min = Math.min(zone.getYMin(), zone.getYMax());
         int max = Math.max(zone.getYMin(), zone.getYMax());
@@ -443,6 +541,9 @@ public class MMSpawnManager {
         return state.isSolidRender(level, pos);
     }
 
+    /**
+     * Verifica que el mob tenga dos bloques de aire para aparecer sin ahogarse en bloques.
+     */
     private static boolean isSpawnSpaceValid(ServerLevel level, BlockPos pos) {
         BlockState current = level.getBlockState(pos);
         BlockState above = level.getBlockState(pos.above());
@@ -450,6 +551,10 @@ public class MMSpawnManager {
         return current.isAir() && above.isAir();
     }
 
+    /**
+     * Reconecta mobs que ya existen en el mundo y tienen etiquetas del mod.
+     * Esto ayuda después de reiniciar el servidor.
+     */
     private static void syncTaggedMobs(ServerLevel level, SpawnZone zone) {
         for (Entity entity : getTaggedMobsInZone(level, zone)) {
             UUID uuid = entity.getUUID();
@@ -467,6 +572,9 @@ public class MMSpawnManager {
         });
     }
 
+    /**
+     * Busca entidades con etiquetas del mod dentro del área aproximada de la zona.
+     */
     private static List<Entity> getTaggedMobsInZone(ServerLevel level, SpawnZone zone) {
         double radius = zone.getRadius() + 8.0D;
 
@@ -510,6 +618,9 @@ public class MMSpawnManager {
         return server.getLevel(key);
     }
 
+    /**
+     * Crea o reemplaza una tarea visual para mostrar una zona con partículas por varios segundos.
+     */
     public static void showZone(ServerLevel level, SpawnZone zone, int seconds) {
         int safeSeconds = Math.max(1, Math.min(seconds, 120));
         long endTick = level.getGameTime() + safeSeconds * 20L;
@@ -518,6 +629,9 @@ public class MMSpawnManager {
         showZoneParticles(level, zone);
     }
 
+    /**
+     * Dibuja centro, radio y puntos manuales con partículas.
+     */
     private static void showZoneParticles(ServerLevel level, SpawnZone zone) {
         double cx = zone.getCenterX();
         double cy = zone.getCenterY();
@@ -551,6 +665,9 @@ public class MMSpawnManager {
                 .toList();
     }
 
+    /**
+     * Crea una etiqueta segura para los mobs de una zona específica.
+     */
     private static String getZoneTag(SpawnZone zone) {
         return "mmspawn_zone_" + zone.getId().replaceAll("[^a-zA-Z0-9_]", "_");
     }
@@ -559,6 +676,9 @@ public class MMSpawnManager {
         return Math.max(min, Math.min(max, value));
     }
 
+    /**
+     * Datos de una visualización temporal de zona.
+     */
     private static class VisualTask {
         private final String zoneId;
         private final String dimension;
