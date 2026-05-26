@@ -6,6 +6,8 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
 import com.mojang.brigadier.context.ParsedCommandNode;
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
@@ -18,14 +20,12 @@ import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import org.crafterscr.craftersmobmanagerspawn.compat.CobblemonCompat;
+import org.crafterscr.craftersmobmanagerspawn.data.SpawnMobEntry;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnPointData;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnZone;
 import org.crafterscr.craftersmobmanagerspawn.logic.MMSpawnManager;
 import org.crafterscr.craftersmobmanagerspawn.util.HeightMode;
-
-import com.mojang.brigadier.suggestion.Suggestions;
-import com.mojang.brigadier.suggestion.SuggestionsBuilder;
-import org.crafterscr.craftersmobmanagerspawn.data.SpawnMobEntry;
+import org.crafterscr.craftersmobmanagerspawn.util.RespawnMode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -39,9 +39,6 @@ import java.util.concurrent.CompletableFuture;
  */
 public class MMSpawnCommands {
 
-    /**
-     * Evento de NeoForge que permite registrar comandos del servidor.
-     */
     @SubscribeEvent
     public static void onRegisterCommands(RegisterCommandsEvent event) {
         register(event.getDispatcher());
@@ -50,9 +47,8 @@ public class MMSpawnCommands {
     /**
      * Construye el árbol completo de comandos.
      *
-     * Importante:
-     * El bloque /mmspawn pokemon solamente se registra si Cobblemon está cargado.
-     * Si Cobblemon no está instalado, ese subcomando no aparece en autocompletado.
+     * Nota:
+     * /mmspawn pokemon solo se registra si Cobblemon está cargado.
      */
     private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("mmspawn")
@@ -133,6 +129,27 @@ public class MMSpawnCommands {
                                                 StringArgumentType.getString(context, "mode")
                                         )))))
 
+                .then(Commands.literal("respawnMode")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("mode", StringArgumentType.word())
+                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(new String[]{"empty", "cooldown"}, builder))
+                                        .executes(context -> setRespawnMode(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                StringArgumentType.getString(context, "mode")
+                                        )))))
+
+                .then(Commands.literal("respawnDelay")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("seconds", IntegerArgumentType.integer(0))
+                                        .executes(context -> setRespawnDelay(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "seconds")
+                                        )))))
+
                 .then(Commands.literal("mob")
                         .then(Commands.literal("add")
                                 .then(Commands.argument("id", StringArgumentType.word())
@@ -150,12 +167,19 @@ public class MMSpawnCommands {
                                 .then(Commands.argument("id", StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
                                         .then(Commands.argument("entity", ResourceLocationArgument.id())
-                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getEntityIds(), builder))
+                                                .suggests(MMSpawnCommands::suggestConfiguredNormalMobsForZone)
                                                 .executes(context -> mobRemove(
                                                         context.getSource(),
                                                         StringArgumentType.getString(context, "id"),
                                                         ResourceLocationArgument.getId(context, "entity")
                                                 )))))
+                        .then(Commands.literal("list")
+                                .then(Commands.argument("id", StringArgumentType.word())
+                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                        .executes(context -> mobList(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id")
+                                        ))))
                         .then(Commands.literal("clear")
                                 .then(Commands.argument("id", StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
@@ -172,16 +196,6 @@ public class MMSpawnCommands {
                                                 context.getSource(),
                                                 StringArgumentType.getString(context, "id"),
                                                 IntegerArgumentType.getInteger(context, "value")
-                                        )))))
-
-                .then(Commands.literal("emptyDelay")
-                        .then(Commands.argument("id", StringArgumentType.word())
-                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                .then(Commands.argument("seconds", IntegerArgumentType.integer(0))
-                                        .executes(context -> setEmptyDelay(
-                                                context.getSource(),
-                                                StringArgumentType.getString(context, "id"),
-                                                IntegerArgumentType.getInteger(context, "seconds")
                                         )))))
 
                 .then(Commands.literal("spawnInterval")
@@ -267,12 +281,6 @@ public class MMSpawnCommands {
                                         StringArgumentType.getString(context, "id")
                                 ))));
 
-        /*
-         * Comandos especiales de Cobblemon.
-         *
-         * Solo se agregan al árbol de comandos si Cobblemon está cargado.
-         * Si Cobblemon no está instalado, /mmspawn pokemon no aparecerá.
-         */
         if (CobblemonCompat.isCobblemonLoaded()) {
             root.then(createPokemonCommand());
         }
@@ -281,22 +289,11 @@ public class MMSpawnCommands {
     }
 
     /**
-     * Crea el bloque:
-     *
-     * /mmspawn pokemon add <id> <weight> <properties...>
-     * /mmspawn pokemon remove <id> <properties...>
-     *
-     * ADD:
-     * Usa el ArgumentType real de Cobblemon para tener sugerencias de especies,
-     * shiny, level, ability, forms/aspects y demás propiedades.
-     *
-     * REMOVE:
-     * Usa sugerencias propias del mod basadas solo en los Pokémon ya configurados
-     * dentro de esa zona.
+     * Comandos especiales de Cobblemon.
+     * Solo existen si Cobblemon está cargado.
      */
     private static LiteralArgumentBuilder<CommandSourceStack> createPokemonCommand() {
         return Commands.literal("pokemon")
-
                 .then(Commands.literal("add")
                         .then(Commands.argument("id", StringArgumentType.word())
                                 .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
@@ -308,28 +305,25 @@ public class MMSpawnCommands {
                                                         IntegerArgumentType.getInteger(context, "weight"),
                                                         getRawArgument(context, "properties")
                                                 ))))))
-
                 .then(Commands.literal("remove")
                         .then(Commands.argument("id", StringArgumentType.word())
                                 .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-
-                                /*
-                                 * Para remove usamos greedyString normal.
-                                 *
-                                 * No usamos CobblemonCompat.pokemonPropertiesArgument()
-                                 * porque aquí NO queremos sugerir todos los Pokémon existentes,
-                                 * sino solo los Pokémon que ya están agregados a esta zona.
-                                 */
                                 .then(Commands.argument("properties", StringArgumentType.greedyString())
                                         .suggests(MMSpawnCommands::suggestConfiguredPokemonForZone)
                                         .executes(context -> pokemonRemove(
                                                 context.getSource(),
                                                 StringArgumentType.getString(context, "id"),
                                                 getRawArgument(context, "properties")
-                                        )))));
+                                        )))))
+                .then(Commands.literal("list")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> pokemonList(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))));
     }
 
-    /** Crea una zona nueva. Si lo ejecuta un jugador, también guarda su posición como centro. */
     private static int create(CommandSourceStack source, String id) {
         if (MMSpawnManager.exists(id)) {
             fail(source, "Ya existe una zona con el ID: " + id);
@@ -340,11 +334,9 @@ public class MMSpawnCommands {
 
         try {
             ServerPlayer player = source.getPlayerOrException();
-
             zone.setCenter(player.getX(), player.getY(), player.getZ());
             zone.setDimension(player.serverLevel().dimension().location().toString());
             MMSpawnManager.save();
-
         } catch (Exception ignored) {
         }
 
@@ -352,7 +344,6 @@ public class MMSpawnCommands {
         return 1;
     }
 
-    /** Elimina completamente una zona y sus mobs asociados. */
     private static int delete(CommandSourceStack source, String id) {
         boolean deleted = MMSpawnManager.deleteZone(source.getServer(), id);
 
@@ -365,7 +356,6 @@ public class MMSpawnCommands {
         return 1;
     }
 
-    /** Muestra todos los IDs de zonas creadas. */
     private static int list(CommandSourceStack source) {
         if (MMSpawnManager.getZoneIds().isEmpty()) {
             success(source, "No hay zonas creadas.");
@@ -376,7 +366,6 @@ public class MMSpawnCommands {
         return 1;
     }
 
-    /** Muestra información rápida de una zona. */
     private static int info(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -390,18 +379,23 @@ public class MMSpawnCommands {
         success(source, "Centro: " + zone.getCenterX() + ", " + zone.getCenterY() + ", " + zone.getCenterZ());
         success(source, "Radio: " + zone.getRadius());
         success(source, "Altura: " + zone.getYMin() + " - " + zone.getYMax());
-        success(source, "Modo: " + zone.getHeightMode());
+        success(source, "Modo de altura: " + zone.getHeightMode());
+        success(source, "Modo de respawn: " + zone.getRespawnMode().name().toLowerCase());
+        success(source, "Respawn delay: " + zone.getRespawnDelaySeconds() + " segundos");
+        success(source, "Spawn interval: " + zone.getSpawnIntervalSeconds() + " segundos");
         success(source, "Máximo vivo: " + zone.getMaxAlive());
         success(source, "Mobs vivos registrados: " + zone.getActiveMobUuids().size());
         success(source, "Mobs configurados: " + zone.getMobs().size());
         success(source, "Puntos manuales: " + zone.getManualPoints().size());
-        success(source, "Empty delay: " + zone.getEmptyDelaySeconds() + " segundos");
-        success(source, "Spawn interval: " + zone.getSpawnIntervalSeconds() + " segundos");
+
+        long remaining = MMSpawnManager.getRespawnRemainingSeconds(zone);
+        if (remaining >= 0L) {
+            success(source, "Cooldown restante: " + remaining + " segundos");
+        }
 
         return 1;
     }
 
-    /** Guarda como centro de la zona la posición actual del jugador. */
     private static int center(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
 
@@ -411,141 +405,126 @@ public class MMSpawnCommands {
 
         try {
             ServerPlayer player = source.getPlayerOrException();
-
             zone.setCenter(player.getX(), player.getY(), player.getZ());
             zone.setDimension(player.serverLevel().dimension().location().toString());
             MMSpawnManager.save();
-
             success(source, "Centro actualizado para " + id + ".");
             return 1;
-
         } catch (Exception e) {
             fail(source, "Este comando debe ejecutarlo un jugador.");
             return 0;
         }
     }
 
-    /** Cambia el radio horizontal de la zona. */
     private static int setRadius(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.setRadius(value);
         MMSpawnManager.save();
-
         success(source, "Radio de " + id + " actualizado a " + value + ".");
         return 1;
     }
 
-    /** Cambia la altura mínima permitida para la zona. */
     private static int setYMin(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.setYMin(value);
         MMSpawnManager.save();
-
         success(source, "Y mínima de " + id + " actualizada a " + value + ".");
         return 1;
     }
 
-    /** Cambia la altura máxima permitida para la zona. */
     private static int setYMax(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.setYMax(value);
         MMSpawnManager.save();
-
         success(source, "Y máxima de " + id + " actualizada a " + value + ".");
         return 1;
     }
 
-    /** Cambia el modo de altura: ground, floor, exact o air. */
     private static int setHeightMode(CommandSourceStack source, String id, String modeText) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         HeightMode mode = HeightMode.fromString(modeText);
         zone.setHeightMode(mode);
         MMSpawnManager.save();
-
         success(source, "Modo de altura de " + id + " actualizado a " + mode.name().toLowerCase() + ".");
         return 1;
     }
 
-    /** Agrega un mob posible a la zona con su peso de aparición. */
+    private static int setRespawnMode(CommandSourceStack source, String id, String modeText) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+        RespawnMode mode = RespawnMode.fromString(modeText);
+        zone.setRespawnMode(mode);
+        MMSpawnManager.save();
+        success(source, "Modo de respawn de " + id + " actualizado a " + mode.name().toLowerCase() + ".");
+        return 1;
+    }
+
+    private static int setRespawnDelay(CommandSourceStack source, String id, int seconds) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+        zone.setRespawnDelaySeconds(seconds);
+        MMSpawnManager.save();
+        success(source, "Respawn delay de " + id + " actualizado a " + seconds + " segundos.");
+        return 1;
+    }
+
     private static int mobAdd(CommandSourceStack source, String id, ResourceLocation entityId, int weight) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.addMob(entityId.toString(), weight);
         MMSpawnManager.save();
-
         success(source, "Mob agregado a " + id + ": " + entityId + " con peso " + weight + ".");
         return 1;
     }
 
-    /** Quita un mob específico de la lista de mobs posibles de la zona. */
     private static int mobRemove(CommandSourceStack source, String id, ResourceLocation entityId) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.removeMob(entityId.toString());
         MMSpawnManager.save();
-
         success(source, "Mob eliminado de " + id + ": " + entityId + ".");
         return 1;
     }
 
-    /** Limpia todos los mobs configurados en la zona. No elimina mobs vivos; para eso está /mmspawn clear. */
-    private static int mobClear(CommandSourceStack source, String id) {
+    private static int mobList(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
 
-        if (zone == null) {
-            return 0;
+        boolean found = false;
+        success(source, "Mobs normales configurados en " + id + ":");
+
+        for (SpawnMobEntry entry : zone.getMobs()) {
+            if (CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
+                continue;
+            }
+
+            found = true;
+            success(source, "- " + entry.getEntityId() + " | peso: " + entry.getWeight());
         }
 
+        if (!found) {
+            success(source, "No hay mobs normales configurados.");
+        }
+
+        return 1;
+    }
+
+    private static int mobClear(CommandSourceStack source, String id) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
         zone.clearMobs();
         MMSpawnManager.save();
-
         success(source, "Lista de mobs limpiada para " + id + ".");
         return 1;
     }
 
-    /**
-     * Agrega un Pokémon de Cobblemon a una zona usando propiedades completas.
-     *
-     * Ejemplos:
-     * /mmspawn pokemon add zona 100 pikachu
-     * /mmspawn pokemon add zona 100 pikachu shiny
-     * /mmspawn pokemon add zona 100 pikachu level=25 shiny
-     * /mmspawn pokemon add zona 100 abra shiny ability=synchronize
-     */
     private static int pokemonAdd(CommandSourceStack source, String id, int weight, String properties) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
+        if (zone == null) return 0;
 
         String cleanProperties = CobblemonCompat.normalizeProperties(properties);
 
@@ -555,28 +534,15 @@ public class MMSpawnCommands {
         }
 
         String storedEntry = CobblemonCompat.toStoredPokemonEntry(cleanProperties);
-
         zone.addMob(storedEntry, weight);
         MMSpawnManager.save();
-
         success(source, "Pokémon agregado a " + id + ": " + cleanProperties + " con peso " + weight + ".");
         return 1;
     }
 
-    /**
-     * Quita un Pokémon configurado de una zona.
-     *
-     * Debe escribirse igual que fue agregado.
-     *
-     * Ejemplo:
-     * /mmspawn pokemon remove zona pikachu level=25 shiny
-     */
     private static int pokemonRemove(CommandSourceStack source, String id, String properties) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
+        if (zone == null) return 0;
 
         String cleanProperties = CobblemonCompat.normalizeProperties(properties);
 
@@ -586,33 +552,36 @@ public class MMSpawnCommands {
         }
 
         String storedEntry = CobblemonCompat.toStoredPokemonEntry(cleanProperties);
-
         zone.removeMob(storedEntry);
         MMSpawnManager.save();
-
         success(source, "Pokémon eliminado de " + id + ": " + cleanProperties + ".");
         return 1;
     }
 
-    /**
-     * Sugiere solamente los Pokémon de Cobblemon que ya están configurados
-     * dentro de la zona indicada.
-     *
-     * Ejemplo:
-     * Si la zona tiene:
-     * cobblemon:pikachu
-     * cobblemon:pikachu level=25 shiny
-     * cobblemon:charizard level=50
-     *
-     * El comando sugerirá:
-     * pikachu
-     * pikachu level=25 shiny
-     * charizard level=50
-     */
-    private static CompletableFuture<Suggestions> suggestConfiguredPokemonForZone(
-            CommandContext<CommandSourceStack> context,
-            SuggestionsBuilder builder
-    ) {
+    private static int pokemonList(CommandSourceStack source, String id) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        boolean found = false;
+        success(source, "Pokémon configurados en " + id + ":");
+
+        for (SpawnMobEntry entry : zone.getMobs()) {
+            if (!CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
+                continue;
+            }
+
+            found = true;
+            success(source, "- " + CobblemonCompat.toPokemonProperties(entry.getEntityId()) + " | peso: " + entry.getWeight());
+        }
+
+        if (!found) {
+            success(source, "No hay Pokémon configurados.");
+        }
+
+        return 1;
+    }
+
+    private static CompletableFuture<Suggestions> suggestConfiguredPokemonForZone(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
         String zoneId;
 
         try {
@@ -630,32 +599,40 @@ public class MMSpawnCommands {
         List<String> suggestions = new ArrayList<>();
 
         for (SpawnMobEntry entry : zone.getMobs()) {
-            String entityId = entry.getEntityId();
-
-            if (!CobblemonCompat.isCobblemonPokemonEntry(entityId)) {
-                continue;
+            if (CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
+                suggestions.add(CobblemonCompat.toPokemonProperties(entry.getEntityId()));
             }
-
-            /*
-             * Convierte:
-             * cobblemon:pikachu level=25 shiny
-             *
-             * En:
-             * pikachu level=25 shiny
-             */
-            suggestions.add(CobblemonCompat.toPokemonProperties(entityId));
         }
 
         return SharedSuggestionProvider.suggest(suggestions, builder);
     }
 
-    /**
-     * Obtiene el texto original escrito en un argumento de Brigadier.
-     *
-     * Esto es necesario porque el argumento de Cobblemon no devuelve String.
-     * Devuelve un objeto interno de Cobblemon, pero nosotros queremos guardar
-     * el texto exacto que escribió el admin.
-     */
+    private static CompletableFuture<Suggestions> suggestConfiguredNormalMobsForZone(CommandContext<CommandSourceStack> context, SuggestionsBuilder builder) {
+        String zoneId;
+
+        try {
+            zoneId = StringArgumentType.getString(context, "id");
+        } catch (IllegalArgumentException exception) {
+            return builder.buildFuture();
+        }
+
+        SpawnZone zone = MMSpawnManager.getZone(zoneId);
+
+        if (zone == null) {
+            return builder.buildFuture();
+        }
+
+        List<String> suggestions = new ArrayList<>();
+
+        for (SpawnMobEntry entry : zone.getMobs()) {
+            if (!CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
+                suggestions.add(entry.getEntityId());
+            }
+        }
+
+        return SharedSuggestionProvider.suggest(suggestions, builder);
+    }
+
     private static String getRawArgument(CommandContext<CommandSourceStack> context, String argumentName) {
         for (ParsedCommandNode<CommandSourceStack> node : context.getNodes()) {
             if (node.getNode().getName().equals(argumentName)) {
@@ -666,73 +643,36 @@ public class MMSpawnCommands {
         return "";
     }
 
-    /** Define cuántos mobs vivos como máximo puede mantener la zona. */
     private static int setMax(CommandSourceStack source, String id, int value) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.setMaxAlive(value);
         MMSpawnManager.save();
-
         success(source, "Máximo de mobs vivos de " + id + " actualizado a " + value + ".");
         return 1;
     }
 
-    /** Define cuántos segundos debe estar vacía la zona antes de reponer mobs. */
-    private static int setEmptyDelay(CommandSourceStack source, String id, int seconds) {
-        SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
-        zone.setEmptyDelaySeconds(seconds);
-        MMSpawnManager.save();
-
-        success(source, "Empty delay de " + id + " actualizado a " + seconds + " segundos.");
-        return 1;
-    }
-
-    /** Define cada cuántos segundos aparece un mob durante el respawn progresivo. */
     private static int setSpawnInterval(CommandSourceStack source, String id, int seconds) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.setSpawnIntervalSeconds(seconds);
         MMSpawnManager.save();
-
         success(source, "Spawn interval de " + id + " actualizado a " + seconds + " segundos.");
         return 1;
     }
 
-    /** Activa o detiene una zona. */
     private static int setActive(CommandSourceStack source, String id, boolean active) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.setActive(active);
         MMSpawnManager.save();
-
         success(source, active ? "Zona activada: " + id : "Zona detenida: " + id);
         return 1;
     }
 
-    /** Muestra centro, radio y puntos manuales con partículas por varios segundos. */
     private static int show(CommandSourceStack source, String id, int seconds) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
+        if (zone == null) return 0;
 
         ServerLevel level = MMSpawnManager.getLevel(source.getServer(), zone);
 
@@ -746,13 +686,9 @@ public class MMSpawnCommands {
         return 1;
     }
 
-    /** Teletransporta al admin al centro de una zona. */
     private static int teleport(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
+        if (zone == null) return 0;
 
         try {
             ServerPlayer player = source.getPlayerOrException();
@@ -766,72 +702,49 @@ public class MMSpawnCommands {
             player.teleportTo(level, zone.getCenterX(), zone.getCenterY(), zone.getCenterZ(), player.getYRot(), player.getXRot());
             success(source, "Teletransportado al centro de " + id + ".");
             return 1;
-
         } catch (Exception e) {
             fail(source, "Este comando debe ejecutarlo un jugador.");
             return 0;
         }
     }
 
-    /** Agrega la posición actual del jugador como punto manual de aparición. */
     private static int pointAdd(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
+        if (zone == null) return 0;
 
         try {
             ServerPlayer player = source.getPlayerOrException();
             BlockPos pos = player.blockPosition();
-
             zone.addManualPoint(new SpawnPointData(pos));
             MMSpawnManager.save();
-
             success(source, "Punto manual agregado a " + id + ": " + pos.getX() + " " + pos.getY() + " " + pos.getZ());
             return 1;
-
         } catch (Exception e) {
             fail(source, "Este comando debe ejecutarlo un jugador.");
             return 0;
         }
     }
 
-    /** Elimina todos los puntos manuales de una zona. */
     private static int pointClear(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         zone.clearManualPoints();
         MMSpawnManager.save();
-
         success(source, "Puntos manuales limpiados para " + id + ".");
         return 1;
     }
 
-    /** Elimina los mobs vivos asociados a una zona, pero no borra la zona. */
     private static int clearActive(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
-
+        if (zone == null) return 0;
         MMSpawnManager.clearActiveMobs(source.getServer(), zone);
         success(source, "Mobs activos limpiados de " + id + ".");
         return 1;
     }
 
-    /** Fuerza el respawn hasta llenar la zona al máximo configurado. */
     private static int force(CommandSourceStack source, String id) {
         SpawnZone zone = getZoneOrFail(source, id);
-
-        if (zone == null) {
-            return 0;
-        }
+        if (zone == null) return 0;
 
         ServerLevel level = MMSpawnManager.getLevel(source.getServer(), zone);
 
@@ -845,7 +758,6 @@ public class MMSpawnCommands {
         return 1;
     }
 
-    /** Busca una zona; si no existe, envía un error al admin. */
     private static SpawnZone getZoneOrFail(CommandSourceStack source, String id) {
         SpawnZone zone = MMSpawnManager.getZone(id);
 
@@ -857,12 +769,10 @@ public class MMSpawnCommands {
         return zone;
     }
 
-    /** Mensaje verde de éxito para comandos. */
     private static void success(CommandSourceStack source, String message) {
         source.sendSuccess(() -> Component.literal("§a[MMSpawn] §f" + message), false);
     }
 
-    /** Mensaje rojo de error para comandos. */
     private static void fail(CommandSourceStack source, String message) {
         source.sendFailure(Component.literal("§c[MMSpawn] §f" + message));
     }

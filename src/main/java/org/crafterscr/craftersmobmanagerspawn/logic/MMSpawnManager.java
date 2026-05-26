@@ -24,6 +24,7 @@ import org.crafterscr.craftersmobmanagerspawn.data.MMSpawnStorage;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnMobEntry;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnPointData;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnZone;
+import org.crafterscr.craftersmobmanagerspawn.util.RespawnMode;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -143,13 +144,14 @@ public class MMSpawnManager {
     /**
      * Lógica principal de una zona.
      *
-     * Flujo:
-     * 1. Si la zona está detenida, no hace nada.
-     * 2. Re-sincroniza mobs con etiquetas del mod.
-     * 3. Limpia UUIDs de mobs muertos.
-     * 4. Si hay jugadores dentro, cancela el contador de zona vacía.
-     * 5. Si la zona está vacía, espera emptyDelay.
-     * 6. Después repone mobs faltantes poco a poco según spawnInterval.
+     * EMPTY:
+     * - La zona debe estar vacía durante respawnDelaySeconds.
+     * - Si un jugador entra, el contador se reinicia.
+     *
+     * COOLDOWN:
+     * - Al morir/faltar mobs, se programa un próximo respawn con tiempo real.
+     * - Ese tiempo NO se reinicia si un jugador entra.
+     * - Si el cooldown terminó pero hay jugadores dentro, espera a que se vayan.
      */
     private static void tickZone(MinecraftServer server, SpawnZone zone) {
         if (!zone.isActive()) {
@@ -165,22 +167,31 @@ public class MMSpawnManager {
         long gameTime = level.getGameTime();
 
         syncTaggedMobs(level, zone);
+
+        int trackedBeforeCleanup = getTrackedMobCount(zone);
         cleanupDeadMobs(level, zone);
+        int trackedAfterCleanup = getTrackedMobCount(zone);
 
         if (zone.getMobs().isEmpty()) {
             return;
         }
 
-        /*
-         * IMPORTANTE:
-         * Aquí usamos getTrackedMobCount(zone), no solo activeMobUuids.
-         *
-         * Eso cuenta:
-         * - Mobs ya detectados.
-         * - Pokémon de Cobblemon pendientes de detectarse.
-         *
-         * Esto evita el bug donde max=1 terminaba generando 2 Pokémon.
-         */
+        if (zone.getMaxAlive() <= 0) {
+            return;
+        }
+
+        if (zone.getRespawnMode() == RespawnMode.COOLDOWN) {
+            tickCooldownZone(level, zone, gameTime, trackedBeforeCleanup, trackedAfterCleanup);
+        } else {
+            tickEmptyZone(level, zone, gameTime);
+        }
+    }
+
+    /**
+     * Modo EMPTY: mismo comportamiento clásico del mod.
+     * La zona debe estar vacía durante respawnDelaySeconds.
+     */
+    private static void tickEmptyZone(ServerLevel level, SpawnZone zone, long gameTime) {
         if (getTrackedMobCount(zone) >= zone.getMaxAlive()) {
             zone.setEmptySinceTick(-1);
             return;
@@ -198,9 +209,9 @@ public class MMSpawnManager {
             return;
         }
 
-        long emptyDelayTicks = zone.getEmptyDelaySeconds() * 20L;
+        long delayTicks = zone.getRespawnDelaySeconds() * 20L;
 
-        if (gameTime - zone.getEmptySinceTick() < emptyDelayTicks) {
+        if (gameTime - zone.getEmptySinceTick() < delayTicks) {
             return;
         }
 
@@ -212,10 +223,88 @@ public class MMSpawnManager {
 
         boolean spawned = spawnOneMob(level, zone);
 
-        // Solo actualizamos el intervalo si realmente se pudo crear o mandar a crear un mob.
         if (spawned) {
             zone.setLastSpawnTick(gameTime);
         }
+    }
+
+    /**
+     * Modo COOLDOWN: pensado para bosses o spawns raros.
+     *
+     * El contador se basa en tiempo real del sistema y se guarda en JSON.
+     * Eso permite cooldowns largos como 345600 segundos, incluso con reinicios.
+     */
+    private static void tickCooldownZone(ServerLevel level, SpawnZone zone, long gameTime, int trackedBeforeCleanup, int trackedAfterCleanup) {
+        long now = System.currentTimeMillis();
+
+        /*
+         * Si antes estaba lleno y ahora falta algo, significa que murió un mob/boss.
+         * Programamos el próximo respawn.
+         */
+        if (trackedBeforeCleanup >= zone.getMaxAlive()
+                && trackedAfterCleanup < zone.getMaxAlive()
+                && zone.getNextRespawnEpochMillis() < 0L) {
+            scheduleCooldown(zone, now);
+            return;
+        }
+
+        if (getTrackedMobCount(zone) >= zone.getMaxAlive()) {
+            zone.setEmptySinceTick(-1);
+            return;
+        }
+
+        /*
+         * Si no hay cooldown programado y faltan mobs, la zona queda lista.
+         * Esto permite que un boss aparezca la primera vez cuando activas la zona.
+         */
+        if (zone.getNextRespawnEpochMillis() < 0L) {
+            zone.setNextRespawnEpochMillis(0L);
+            save();
+        }
+
+        if (zone.getNextRespawnEpochMillis() > now) {
+            return;
+        }
+
+        /*
+         * Si ya terminó el cooldown pero hay jugadores dentro,
+         * NO se reinicia el contador. Solo esperamos a que se vayan.
+         */
+        if (hasPlayersInside(level, zone)) {
+            return;
+        }
+
+        long intervalTicks = zone.getSpawnIntervalSeconds() * 20L;
+
+        if (zone.getLastSpawnTick() >= 0 && gameTime - zone.getLastSpawnTick() < intervalTicks) {
+            return;
+        }
+
+        boolean spawned = spawnOneMob(level, zone);
+
+        if (spawned) {
+            zone.setLastSpawnTick(gameTime);
+
+            /*
+             * Si ya llenamos el máximo, limpiamos el cooldown pendiente.
+             * Cuando el boss muera otra vez, se programará de nuevo.
+             */
+            if (getTrackedMobCount(zone) >= zone.getMaxAlive()) {
+                zone.setNextRespawnEpochMillis(-1L);
+                save();
+            }
+        }
+    }
+
+    /**
+     * Programa el próximo respawn para modo COOLDOWN.
+     */
+    private static void scheduleCooldown(SpawnZone zone, long nowMillis) {
+        long delayMillis = zone.getRespawnDelaySeconds() * 1000L;
+        zone.setNextRespawnEpochMillis(nowMillis + delayMillis);
+        zone.setEmptySinceTick(-1);
+        zone.setLastSpawnTick(-1);
+        save();
     }
 
     /**
@@ -313,17 +402,8 @@ public class MMSpawnManager {
 
     /**
      * Elimina del mundo todos los mobs activos asociados a una zona.
-     *
-     * Usa tres sistemas:
-     * - Limpia Pokémon pendientes.
-     * - Borra entidades con etiquetas persistentes.
-     * - Borra entidades por UUID registrados en memoria.
      */
     public static void clearActiveMobs(MinecraftServer server, SpawnZone zone) {
-        /*
-         * Si había un /pokespawnat pendiente para esta zona,
-         * lo quitamos para que no cuente ni se resuelva después de limpiar.
-         */
         PENDING_COBBLEMON_SPAWNS.removeIf(pending -> pending.zoneId.equalsIgnoreCase(zone.getId()));
 
         ServerLevel level = getLevel(server, zone);
@@ -333,17 +413,10 @@ public class MMSpawnManager {
             return;
         }
 
-        /*
-         * Primero borramos por etiquetas.
-         * Esto sirve incluso después de reiniciar el servidor.
-         */
         for (Entity entity : getTaggedMobsInZone(level, zone)) {
             entity.discard();
         }
 
-        /*
-         * Luego borramos por UUIDs registrados en memoria.
-         */
         for (UUID uuid : new ArrayList<>(zone.getActiveMobUuids())) {
             Entity entity = level.getEntity(uuid);
 
@@ -357,13 +430,6 @@ public class MMSpawnManager {
 
     /**
      * Fuerza el respawn hasta llenar la zona al máximo permitido.
-     *
-     * Respeta:
-     * - maxAlive.
-     * - Pesos.
-     * - Puntos manuales.
-     * - Modo de altura.
-     * - Pokémon pendientes de Cobblemon.
      */
     public static int forceRespawn(ServerLevel level, SpawnZone zone) {
         syncTaggedMobs(level, zone);
@@ -371,12 +437,6 @@ public class MMSpawnManager {
 
         int spawned = 0;
 
-        /*
-         * IMPORTANTE:
-         * Aquí también usamos getTrackedMobCount(zone).
-         * Si usamos solo activeMobUuids, el force puede mandar dos /pokespawnat
-         * antes de detectar el primer Pokémon.
-         */
         while (getTrackedMobCount(zone) < zone.getMaxAlive()) {
             boolean success = spawnOneMob(level, zone);
 
@@ -387,15 +447,16 @@ public class MMSpawnManager {
             spawned++;
         }
 
+        if (getTrackedMobCount(zone) >= zone.getMaxAlive() && zone.getRespawnMode() == RespawnMode.COOLDOWN) {
+            zone.setNextRespawnEpochMillis(-1L);
+            save();
+        }
+
         return spawned;
     }
 
     /**
      * Crea un solo mob de la zona.
-     *
-     * Si es una entidad normal, usa EntityType.
-     * Si es una entrada Cobblemon, ejecuta /pokespawnat y la deja como pending
-     * para evitar el doble spawn.
      */
     private static boolean spawnOneMob(ServerLevel level, SpawnZone zone) {
         SpawnMobEntry entry = pickWeightedMob(zone);
@@ -410,13 +471,6 @@ public class MMSpawnManager {
             return false;
         }
 
-        /*
-         * Compatibilidad con Cobblemon.
-         *
-         * Ejemplos guardados en SpawnMobEntry:
-         * cobblemon:pikachu
-         * cobblemon:pikachu level=25 shiny
-         */
         if (CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
             Vec3 spawnVec = new Vec3(
                     spawnPos.getX() + 0.5D,
@@ -424,10 +478,6 @@ public class MMSpawnManager {
                     spawnPos.getZ() + 0.5D
             );
 
-            /*
-             * Guardamos los Pokémon que ya estaban cerca antes del comando.
-             * Así sabremos cuál es el nuevo.
-             */
             Set<UUID> beforeUuids = CobblemonCompat.getPokemonUuidsNear(
                     level,
                     spawnVec,
@@ -447,33 +497,15 @@ public class MMSpawnManager {
                     level.getGameTime()
             );
 
-            /*
-             * A veces Cobblemon crea la entidad de inmediato.
-             * Si ya se puede detectar, la etiquetamos de una vez.
-             *
-             * Si no se puede detectar todavía, la dejamos pendiente.
-             */
             boolean resolvedNow = tryResolvePendingCobblemonSpawn(level, zone, pending);
 
             if (!resolvedNow) {
                 PENDING_COBBLEMON_SPAWNS.add(pending);
             }
 
-            /*
-             * Devolvemos true porque el comando sí se mandó.
-             * Esto evita que el mod intente spawnear otro inmediatamente.
-             */
             return true;
         }
 
-        /*
-         * Sistema normal para mobs vanilla o de otros mods.
-         *
-         * Ejemplos:
-         * minecraft:zombie
-         * minecraft:slime
-         * alexsmobs:crocodile
-         */
         Optional<EntityType<?>> optionalType = BuiltInRegistries.ENTITY_TYPE.getOptional(ResourceLocation.parse(entry.getEntityId()));
 
         if (optionalType.isEmpty()) {
@@ -511,10 +543,6 @@ public class MMSpawnManager {
         return added;
     }
 
-    /**
-     * Elige un mob según su peso.
-     * Peso alto = más probabilidad de salir.
-     */
     private static SpawnMobEntry pickWeightedMob(SpawnZone zone) {
         int totalWeight = 0;
 
@@ -540,18 +568,8 @@ public class MMSpawnManager {
         return zone.getMobs().get(0);
     }
 
-    /**
-     * Decide la posición final del spawn.
-     *
-     * Si hay puntos manuales, intenta usarlos primero.
-     * Si no hay puntos manuales, busca una posición aleatoria dentro del radio
-     * usando el modo de altura configurado.
-     */
     private static BlockPos chooseSpawnPos(ServerLevel level, SpawnZone zone) {
         if (!zone.getManualPoints().isEmpty()) {
-            /*
-             * Probamos varios puntos manuales por si uno está bloqueado.
-             */
             for (int attempt = 0; attempt < Math.min(20, zone.getManualPoints().size()); attempt++) {
                 SpawnPointData point = zone.getManualPoints().get(RANDOM.nextInt(zone.getManualPoints().size()));
                 BlockPos manual = point.toBlockPos();
@@ -592,11 +610,6 @@ public class MMSpawnManager {
         return null;
     }
 
-    /**
-     * EXACT:
-     * Usa exactamente la altura del centro de la zona.
-     * Ideal para bosses o spawns muy controlados.
-     */
     private static BlockPos findExactPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int y = clamp((int) Math.round(zone.getCenterY()), zone.getYMin(), zone.getYMax());
         BlockPos pos = new BlockPos(x, y, z);
@@ -608,11 +621,6 @@ public class MMSpawnManager {
         return null;
     }
 
-    /**
-     * GROUND:
-     * Busca desde arriba hacia abajo hasta encontrar suelo sólido.
-     * Ideal para exteriores, bosques, campos o zonas naturales.
-     */
     private static BlockPos findGroundPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int min = Math.min(zone.getYMin(), zone.getYMax());
         int max = Math.max(zone.getYMin(), zone.getYMax());
@@ -629,11 +637,6 @@ public class MMSpawnManager {
         return null;
     }
 
-    /**
-     * FLOOR:
-     * Busca un suelo cerca de la altura central de la zona.
-     * Ideal para interiores, pisos de mazmorras, torres o edificios.
-     */
     private static BlockPos findFloorPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int centerY = (int) Math.round(zone.getCenterY());
 
@@ -655,11 +658,6 @@ public class MMSpawnManager {
         return null;
     }
 
-    /**
-     * AIR:
-     * Busca un espacio libre aleatorio dentro del rango Y.
-     * Ideal para mobs voladores.
-     */
     private static BlockPos findAirPos(ServerLevel level, int x, int z, SpawnZone zone) {
         int min = Math.min(zone.getYMin(), zone.getYMax());
         int max = Math.max(zone.getYMin(), zone.getYMax());
@@ -681,9 +679,6 @@ public class MMSpawnManager {
         return state.isSolidRender(level, pos);
     }
 
-    /**
-     * Verifica que el mob tenga dos bloques de aire para aparecer sin ahogarse en bloques.
-     */
     private static boolean isSpawnSpaceValid(ServerLevel level, BlockPos pos) {
         BlockState current = level.getBlockState(pos);
         BlockState above = level.getBlockState(pos.above());
@@ -691,10 +686,6 @@ public class MMSpawnManager {
         return current.isAir() && above.isAir();
     }
 
-    /**
-     * Reconecta mobs que ya existen en el mundo y tienen etiquetas del mod.
-     * Esto ayuda después de reiniciar el servidor.
-     */
     private static void syncTaggedMobs(ServerLevel level, SpawnZone zone) {
         for (Entity entity : getTaggedMobsInZone(level, zone)) {
             UUID uuid = entity.getUUID();
@@ -705,9 +696,6 @@ public class MMSpawnManager {
         }
     }
 
-    /**
-     * Limpia de la lista interna los mobs que ya murieron o ya no existen.
-     */
     private static void cleanupDeadMobs(ServerLevel level, SpawnZone zone) {
         zone.getActiveMobUuids().removeIf(uuid -> {
             Entity entity = level.getEntity(uuid);
@@ -715,9 +703,6 @@ public class MMSpawnManager {
         });
     }
 
-    /**
-     * Busca entidades con etiquetas del mod dentro del área aproximada de la zona.
-     */
     private static List<Entity> getTaggedMobsInZone(ServerLevel level, SpawnZone zone) {
         double radius = zone.getRadius() + 8.0D;
 
@@ -740,9 +725,6 @@ public class MMSpawnManager {
         );
     }
 
-    /**
-     * Revisa si hay jugadores dentro del cilindro de la zona.
-     */
     private static boolean hasPlayersInside(ServerLevel level, SpawnZone zone) {
         for (Player player : level.players()) {
             if (player.isSpectator()) {
@@ -757,9 +739,6 @@ public class MMSpawnManager {
         return false;
     }
 
-    /**
-     * Obtiene la dimensión donde existe una zona.
-     */
     public static ServerLevel getLevel(MinecraftServer server, SpawnZone zone) {
         ResourceLocation location = ResourceLocation.parse(zone.getDimension());
         ResourceKey<Level> key = ResourceKey.create(net.minecraft.core.registries.Registries.DIMENSION, location);
@@ -767,9 +746,6 @@ public class MMSpawnManager {
         return server.getLevel(key);
     }
 
-    /**
-     * Crea o reemplaza una tarea visual para mostrar una zona con partículas por varios segundos.
-     */
     public static void showZone(ServerLevel level, SpawnZone zone, int seconds) {
         int safeSeconds = Math.max(1, Math.min(seconds, 120));
         long endTick = level.getGameTime() + safeSeconds * 20L;
@@ -778,20 +754,15 @@ public class MMSpawnManager {
         showZoneParticles(level, zone);
     }
 
-    /**
-     * Dibuja centro, radio y puntos manuales con partículas.
-     */
     private static void showZoneParticles(ServerLevel level, SpawnZone zone) {
         double cx = zone.getCenterX();
         double cy = zone.getCenterY();
         double cz = zone.getCenterZ();
 
-        // Centro de la zona.
         level.sendParticles(ParticleTypes.END_ROD, cx, cy + 1.0D, cz, 20, 0.3D, 0.8D, 0.3D, 0.01D);
 
         int radius = zone.getRadius();
 
-        // Círculo del radio.
         for (int i = 0; i < 128; i++) {
             double angle = (Math.PI * 2.0D) * i / 128.0D;
 
@@ -801,36 +772,16 @@ public class MMSpawnManager {
             level.sendParticles(ParticleTypes.HAPPY_VILLAGER, x, cy + 0.2D, z, 1, 0, 0, 0, 0);
         }
 
-        // Puntos manuales.
         for (SpawnPointData point : zone.getManualPoints()) {
             BlockPos pos = point.toBlockPos();
-            level.sendParticles(
-                    ParticleTypes.FLAME,
-                    pos.getX() + 0.5D,
-                    pos.getY() + 1.0D,
-                    pos.getZ() + 0.5D,
-                    8,
-                    0.2D,
-                    0.4D,
-                    0.2D,
-                    0.01D
-            );
+            level.sendParticles(ParticleTypes.FLAME, pos.getX() + 0.5D, pos.getY() + 1.0D, pos.getZ() + 0.5D, 8, 0.2D, 0.4D, 0.2D, 0.01D);
         }
     }
 
-    /**
-     * Cuenta mobs activos + spawns pendientes.
-     *
-     * Esto es importante para Cobblemon porque el Pokémon puede tardar unos ticks
-     * en ser detectado por nuestro sistema después de ejecutar /pokespawnat.
-     */
     private static int getTrackedMobCount(SpawnZone zone) {
         return zone.getActiveMobUuids().size() + getPendingCobblemonCount(zone);
     }
 
-    /**
-     * Cuenta cuántos Pokémon de Cobblemon están pendientes para esta zona.
-     */
     private static int getPendingCobblemonCount(SpawnZone zone) {
         int count = 0;
 
@@ -843,12 +794,6 @@ public class MMSpawnManager {
         return count;
     }
 
-    /**
-     * Revisa los Pokémon pendientes.
-     *
-     * Si el Pokémon ya existe en el mundo, lo etiqueta y lo registra.
-     * Si pasan demasiados ticks y nunca aparece, se elimina el pending para no bloquear la zona.
-     */
     private static void tickPendingCobblemonSpawns(MinecraftServer server) {
         Iterator<PendingCobblemonSpawn> iterator = PENDING_COBBLEMON_SPAWNS.iterator();
 
@@ -884,14 +829,6 @@ public class MMSpawnManager {
         }
     }
 
-    /**
-     * Intenta encontrar el Pokémon que salió de /pokespawnat.
-     *
-     * Reglas:
-     * - Debe estar cerca de donde mandamos el comando.
-     * - No debe estar en la lista de Pokémon que ya existían antes.
-     * - No debe tener ya la etiqueta general del mod.
-     */
     private static boolean tryResolvePendingCobblemonSpawn(ServerLevel level, SpawnZone zone, PendingCobblemonSpawn pending) {
         for (Entity entity : CobblemonCompat.getPokemonNear(level, pending.position, COBBLEMON_PENDING_SEARCH_RADIUS)) {
             UUID uuid = entity.getUUID();
@@ -917,9 +854,6 @@ public class MMSpawnManager {
         return false;
     }
 
-    /**
-     * Devuelve IDs de entidades vanilla y de otros mods para autocompletado.
-     */
     public static List<String> getEntityIds() {
         return BuiltInRegistries.ENTITY_TYPE
                 .keySet()
@@ -930,22 +864,36 @@ public class MMSpawnManager {
     }
 
     /**
-     * Crea una etiqueta segura para los mobs de una zona específica.
+     * Devuelve segundos restantes para el cooldown de una zona.
+     * -1 significa que no hay cooldown pendiente.
      */
+    public static long getRespawnRemainingSeconds(SpawnZone zone) {
+        if (zone.getRespawnMode() != RespawnMode.COOLDOWN) {
+            return -1L;
+        }
+
+        long next = zone.getNextRespawnEpochMillis();
+
+        if (next < 0L) {
+            return -1L;
+        }
+
+        if (next == 0L) {
+            return 0L;
+        }
+
+        long diff = next - System.currentTimeMillis();
+        return Math.max(0L, (diff + 999L) / 1000L);
+    }
+
     private static String getZoneTag(SpawnZone zone) {
         return "mmspawn_zone_" + zone.getId().replaceAll("[^a-zA-Z0-9_]", "_");
     }
 
-    /**
-     * Limita un valor entre mínimo y máximo.
-     */
     private static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
     }
 
-    /**
-     * Datos de una visualización temporal de zona.
-     */
     private static class VisualTask {
         private final String zoneId;
         private final String dimension;
@@ -958,14 +906,6 @@ public class MMSpawnManager {
         }
     }
 
-    /**
-     * Spawn pendiente de Cobblemon.
-     *
-     * Se usa porque /pokespawnat puede crear el Pokémon,
-     * pero nuestro mod no siempre lo detecta en el mismo momento.
-     *
-     * Mientras está pendiente, cuenta como si ya existiera para evitar doble spawn.
-     */
     private static class PendingCobblemonSpawn {
         private final String zoneId;
         private final Vec3 position;

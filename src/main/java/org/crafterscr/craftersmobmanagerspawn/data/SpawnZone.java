@@ -1,6 +1,8 @@
 package org.crafterscr.craftersmobmanagerspawn.data;
 
+import com.google.gson.annotations.SerializedName;
 import org.crafterscr.craftersmobmanagerspawn.util.HeightMode;
+import org.crafterscr.craftersmobmanagerspawn.util.RespawnMode;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -9,11 +11,12 @@ import java.util.UUID;
 /**
  * Representa una zona de spawn completa.
  *
- * Esta clase guarda la configuración permanente de la zona:
- * ID, dimensión, centro, radio, alturas, mobs permitidos, tiempos, puntos manuales, etc.
+ * Guarda configuración permanente en JSON:
+ * ID, dimensión, centro, radio, alturas, mobs, modo de altura,
+ * modo de respawn, delay, puntos manuales y estado activo.
  *
- * También guarda algunos datos temporales en memoria, como los UUIDs de mobs vivos.
- * Esos datos temporales NO se guardan en el JSON porque usan "transient".
+ * También maneja datos temporales en memoria usando transient:
+ * UUIDs activos, contador de zona vacía y último spawn.
  */
 public class SpawnZone {
 
@@ -38,14 +41,38 @@ public class SpawnZone {
     // Modo que decide cómo buscar la altura final de spawn.
     private HeightMode heightMode = HeightMode.GROUND;
 
+    // Define si la zona funciona por zona vacía o por cooldown fijo.
+    private RespawnMode respawnMode = RespawnMode.EMPTY;
+
     // Cantidad máxima de mobs vivos que esta zona puede mantener.
     private int maxAlive = 5;
 
-    // Tiempo que la zona debe estar vacía antes de empezar a reponer mobs faltantes.
-    private int emptyDelaySeconds = 180;
+    /**
+     * Tiempo general de respawn.
+     *
+     * En modo EMPTY:
+     * La zona debe estar vacía estos segundos antes de reponer mobs.
+     *
+     * En modo COOLDOWN:
+     * Después de que el boss/mob muere, espera estos segundos antes de volver.
+     *
+     * El alternate permite cargar JSON viejo que todavía tenga emptyDelaySeconds.
+     */
+    @SerializedName(value = "respawnDelaySeconds", alternate = {"emptyDelaySeconds"})
+    private int respawnDelaySeconds = 180;
 
     // Tiempo entre cada mob generado durante el respawn progresivo.
     private int spawnIntervalSeconds = 5;
+
+    /**
+     * Próximo respawn programado en tiempo real del sistema.
+     *
+     * Solo se usa en modo COOLDOWN.
+     * Se guarda en JSON para que el cooldown sobreviva reinicios del servidor.
+     * -1 significa que no hay cooldown programado.
+     * 0 significa que el respawn está listo.
+     */
+    private long nextRespawnEpochMillis = -1L;
 
     // Indica si la zona está funcionando o detenida.
     private boolean active = false;
@@ -59,7 +86,7 @@ public class SpawnZone {
     // UUIDs de mobs activos creados por esta zona. Es temporal y se reconstruye con etiquetas.
     private transient List<UUID> activeMobUuids = new ArrayList<>();
 
-    // Tick en el que la zona quedó vacía. -1 significa que todavía no empezó el contador.
+    // Tick en el que la zona quedó vacía. Solo se usa en modo EMPTY.
     private transient long emptySinceTick = -1;
 
     // Último tick en el que apareció un mob. Sirve para respetar spawnInterval.
@@ -80,6 +107,10 @@ public class SpawnZone {
         this.activeMobUuids = new ArrayList<>();
         this.emptySinceTick = -1;
         this.lastSpawnTick = -1;
+
+        if (this.respawnMode == null) {
+            this.respawnMode = RespawnMode.EMPTY;
+        }
     }
 
     public String getId() {
@@ -108,7 +139,6 @@ public class SpawnZone {
 
     /**
      * Define el centro de la zona.
-     * Normalmente se actualiza con /mmspawn center <id>.
      */
     public void setCenter(double x, double y, double z) {
         this.centerX = x;
@@ -148,6 +178,26 @@ public class SpawnZone {
         this.heightMode = heightMode;
     }
 
+    public RespawnMode getRespawnMode() {
+        if (respawnMode == null) {
+            respawnMode = RespawnMode.EMPTY;
+        }
+
+        return respawnMode;
+    }
+
+    public void setRespawnMode(RespawnMode respawnMode) {
+        this.respawnMode = respawnMode == null ? RespawnMode.EMPTY : respawnMode;
+
+        // Al cambiar de modo reiniciamos contadores temporales para evitar estados raros.
+        this.emptySinceTick = -1;
+        this.lastSpawnTick = -1;
+
+        if (this.respawnMode == RespawnMode.EMPTY) {
+            this.nextRespawnEpochMillis = -1L;
+        }
+    }
+
     public int getMaxAlive() {
         return maxAlive;
     }
@@ -156,12 +206,12 @@ public class SpawnZone {
         this.maxAlive = Math.max(0, maxAlive);
     }
 
-    public int getEmptyDelaySeconds() {
-        return emptyDelaySeconds;
+    public int getRespawnDelaySeconds() {
+        return respawnDelaySeconds;
     }
 
-    public void setEmptyDelaySeconds(int emptyDelaySeconds) {
-        this.emptyDelaySeconds = Math.max(0, emptyDelaySeconds);
+    public void setRespawnDelaySeconds(int respawnDelaySeconds) {
+        this.respawnDelaySeconds = Math.max(0, respawnDelaySeconds);
     }
 
     public int getSpawnIntervalSeconds() {
@@ -170,6 +220,14 @@ public class SpawnZone {
 
     public void setSpawnIntervalSeconds(int spawnIntervalSeconds) {
         this.spawnIntervalSeconds = Math.max(1, spawnIntervalSeconds);
+    }
+
+    public long getNextRespawnEpochMillis() {
+        return nextRespawnEpochMillis;
+    }
+
+    public void setNextRespawnEpochMillis(long nextRespawnEpochMillis) {
+        this.nextRespawnEpochMillis = nextRespawnEpochMillis;
     }
 
     public boolean isActive() {
