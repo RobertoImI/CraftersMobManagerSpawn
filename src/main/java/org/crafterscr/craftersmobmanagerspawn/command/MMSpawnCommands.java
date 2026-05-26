@@ -2,6 +2,10 @@ package org.crafterscr.craftersmobmanagerspawn.command;
 
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.context.ParsedCommandNode;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.commands.SharedSuggestionProvider;
@@ -13,10 +17,19 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
+import org.crafterscr.craftersmobmanagerspawn.compat.CobblemonCompat;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnPointData;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnZone;
 import org.crafterscr.craftersmobmanagerspawn.logic.MMSpawnManager;
 import org.crafterscr.craftersmobmanagerspawn.util.HeightMode;
+
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
+import org.crafterscr.craftersmobmanagerspawn.data.SpawnMobEntry;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Registra y ejecuta todos los comandos del mod.
@@ -36,226 +49,284 @@ public class MMSpawnCommands {
 
     /**
      * Construye el árbol completo de comandos.
-     * Aquí se definen subcomandos, argumentos y autocompletados.
+     *
+     * Importante:
+     * El bloque /mmspawn pokemon solamente se registra si Cobblemon está cargado.
+     * Si Cobblemon no está instalado, ese subcomando no aparece en autocompletado.
      */
     private static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
-        dispatcher.register(
-                Commands.literal("mmspawn")
-                        .requires(source -> source.hasPermission(2))
+        LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("mmspawn")
+                .requires(source -> source.hasPermission(2))
 
-                        .then(Commands.literal("create")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .executes(context -> create(
+                .then(Commands.literal("create")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .executes(context -> create(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))))
+
+                .then(Commands.literal("delete")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> delete(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))))
+
+                .then(Commands.literal("list")
+                        .executes(context -> list(context.getSource())))
+
+                .then(Commands.literal("info")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> info(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))))
+
+                .then(Commands.literal("center")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> center(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))))
+
+                .then(Commands.literal("radius")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("value", IntegerArgumentType.integer(1))
+                                        .executes(context -> setRadius(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                        ))))
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "value")
+                                        )))))
 
-                        .then(Commands.literal("delete")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> delete(
+                .then(Commands.literal("ymin")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("value", IntegerArgumentType.integer(-64, 320))
+                                        .executes(context -> setYMin(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                        ))))
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "value")
+                                        )))))
 
-                        .then(Commands.literal("list")
-                                .executes(context -> list(context.getSource())))
-
-                        .then(Commands.literal("info")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> info(
+                .then(Commands.literal("ymax")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("value", IntegerArgumentType.integer(-64, 320))
+                                        .executes(context -> setYMax(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                        ))))
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "value")
+                                        )))))
 
-                        .then(Commands.literal("center")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> center(
+                .then(Commands.literal("heightmode")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("mode", StringArgumentType.word())
+                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(new String[]{"ground", "floor", "exact", "air"}, builder))
+                                        .executes(context -> setHeightMode(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                        ))))
+                                                StringArgumentType.getString(context, "id"),
+                                                StringArgumentType.getString(context, "mode")
+                                        )))))
 
-                        .then(Commands.literal("radius")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
+                .then(Commands.literal("mob")
+                        .then(Commands.literal("add")
+                                .then(Commands.argument("id", StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .then(Commands.argument("value", IntegerArgumentType.integer(1))
-                                                .executes(context -> setRadius(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        IntegerArgumentType.getInteger(context, "value")
-                                                )))))
-
-                        .then(Commands.literal("ymin")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .then(Commands.argument("value", IntegerArgumentType.integer(-64, 320))
-                                                .executes(context -> setYMin(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        IntegerArgumentType.getInteger(context, "value")
-                                                )))))
-
-                        .then(Commands.literal("ymax")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .then(Commands.argument("value", IntegerArgumentType.integer(-64, 320))
-                                                .executes(context -> setYMax(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        IntegerArgumentType.getInteger(context, "value")
-                                                )))))
-
-                        .then(Commands.literal("heightmode")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .then(Commands.argument("mode", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(new String[]{"ground", "floor", "exact", "air"}, builder))
-                                                .executes(context -> setHeightMode(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "mode")
-                                                )))))
-
-                        .then(Commands.literal("mob")
-                                .then(Commands.literal("add")
-                                        .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                                .then(Commands.argument("entity", ResourceLocationArgument.id())
-                                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getEntityIds(), builder))
-                                                        .then(Commands.argument("weight", IntegerArgumentType.integer(1))
-                                                                .executes(context -> mobAdd(
-                                                                        context.getSource(),
-                                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                                        ResourceLocationArgument.getId(context, "entity"),
-                                                                        IntegerArgumentType.getInteger(context, "weight")
-                                                                ))))))
-                                .then(Commands.literal("remove")
-                                        .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                                .then(Commands.argument("entity", ResourceLocationArgument.id())
-                                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getEntityIds(), builder))
-                                                        .executes(context -> mobRemove(
+                                        .then(Commands.argument("entity", ResourceLocationArgument.id())
+                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getEntityIds(), builder))
+                                                .then(Commands.argument("weight", IntegerArgumentType.integer(1))
+                                                        .executes(context -> mobAdd(
                                                                 context.getSource(),
-                                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                                ResourceLocationArgument.getId(context, "entity")
-                                                        )))))
-                                .then(Commands.literal("clear")
-                                        .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                                .executes(context -> mobClear(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                                )))))
-
-                        .then(Commands.literal("max")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
+                                                                StringArgumentType.getString(context, "id"),
+                                                                ResourceLocationArgument.getId(context, "entity"),
+                                                                IntegerArgumentType.getInteger(context, "weight")
+                                                        ))))))
+                        .then(Commands.literal("remove")
+                                .then(Commands.argument("id", StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .then(Commands.argument("value", IntegerArgumentType.integer(0))
-                                                .executes(context -> setMax(
+                                        .then(Commands.argument("entity", ResourceLocationArgument.id())
+                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getEntityIds(), builder))
+                                                .executes(context -> mobRemove(
                                                         context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        IntegerArgumentType.getInteger(context, "value")
+                                                        StringArgumentType.getString(context, "id"),
+                                                        ResourceLocationArgument.getId(context, "entity")
                                                 )))))
-
-                        // emptyDelay deja una sola espera antes de reponer mobs.
-// La zona debe estar vacía este tiempo antes de reponer mobs.
-                        .then(Commands.literal("emptyDelay")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
+                        .then(Commands.literal("clear")
+                                .then(Commands.argument("id", StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .then(Commands.argument("seconds", IntegerArgumentType.integer(0))
-                                                .executes(context -> setEmptyDelay(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        IntegerArgumentType.getInteger(context, "seconds")
-                                                )))))
-
-                        // spawnInterval controla el respawn progresivo: 1 mob cada X segundos.
-                        .then(Commands.literal("spawnInterval")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .then(Commands.argument("seconds", IntegerArgumentType.integer(1))
-                                                .executes(context -> setSpawnInterval(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        IntegerArgumentType.getInteger(context, "seconds")
-                                                )))))
-
-                        .then(Commands.literal("start")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> setActive(
+                                        .executes(context -> mobClear(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                true
-                                        ))))
+                                                StringArgumentType.getString(context, "id")
+                                        )))))
 
-                        .then(Commands.literal("stop")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> setActive(
+                .then(Commands.literal("max")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("value", IntegerArgumentType.integer(0))
+                                        .executes(context -> setMax(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                false
-                                        ))))
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "value")
+                                        )))))
 
-                        // show ahora puede recibir segundos: /mmspawn show <id> [segundos].
-                        .then(Commands.literal("show")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                .then(Commands.literal("emptyDelay")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("seconds", IntegerArgumentType.integer(0))
+                                        .executes(context -> setEmptyDelay(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "seconds")
+                                        )))))
+
+                .then(Commands.literal("spawnInterval")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("seconds", IntegerArgumentType.integer(1))
+                                        .executes(context -> setSpawnInterval(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "seconds")
+                                        )))))
+
+                .then(Commands.literal("start")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> setActive(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id"),
+                                        true
+                                ))))
+
+                .then(Commands.literal("stop")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> setActive(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id"),
+                                        false
+                                ))))
+
+                .then(Commands.literal("show")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> show(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id"),
+                                        10
+                                ))
+                                .then(Commands.argument("seconds", IntegerArgumentType.integer(1, 120))
                                         .executes(context -> show(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                10
-                                        ))
-                                        .then(Commands.argument("seconds", IntegerArgumentType.integer(1, 120))
-                                                .executes(context -> show(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id"),
-                                                        IntegerArgumentType.getInteger(context, "seconds")
-                                                )))))
+                                                StringArgumentType.getString(context, "id"),
+                                                IntegerArgumentType.getInteger(context, "seconds")
+                                        )))))
 
-                        .then(Commands.literal("tp")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
+                .then(Commands.literal("tp")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> teleport(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))))
+
+                .then(Commands.literal("point")
+                        .then(Commands.literal("add")
+                                .then(Commands.argument("id", StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> teleport(
+                                        .executes(context -> pointAdd(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
+                                                StringArgumentType.getString(context, "id")
                                         ))))
-
-                        .then(Commands.literal("point")
-                                .then(Commands.literal("add")
-                                        .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                                .executes(context -> pointAdd(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                                ))))
-                                .then(Commands.literal("clear")
-                                        .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                                .executes(context -> pointClear(
-                                                        context.getSource(),
-                                                        com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                                )))))
-
                         .then(Commands.literal("clear")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
+                                .then(Commands.argument("id", StringArgumentType.word())
                                         .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> clearActive(
+                                        .executes(context -> pointClear(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                        ))))
+                                                StringArgumentType.getString(context, "id")
+                                        )))))
 
-                        .then(Commands.literal("force")
-                                .then(Commands.argument("id", com.mojang.brigadier.arguments.StringArgumentType.word())
-                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                        .executes(context -> force(
+                .then(Commands.literal("clear")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> clearActive(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))))
+
+                .then(Commands.literal("force")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .executes(context -> force(
+                                        context.getSource(),
+                                        StringArgumentType.getString(context, "id")
+                                ))));
+
+        /*
+         * Comandos especiales de Cobblemon.
+         *
+         * Solo se agregan al árbol de comandos si Cobblemon está cargado.
+         * Si Cobblemon no está instalado, /mmspawn pokemon no aparecerá.
+         */
+        if (CobblemonCompat.isCobblemonLoaded()) {
+            root.then(createPokemonCommand());
+        }
+
+        dispatcher.register(root);
+    }
+
+    /**
+     * Crea el bloque:
+     *
+     * /mmspawn pokemon add <id> <weight> <properties...>
+     * /mmspawn pokemon remove <id> <properties...>
+     *
+     * ADD:
+     * Usa el ArgumentType real de Cobblemon para tener sugerencias de especies,
+     * shiny, level, ability, forms/aspects y demás propiedades.
+     *
+     * REMOVE:
+     * Usa sugerencias propias del mod basadas solo en los Pokémon ya configurados
+     * dentro de esa zona.
+     */
+    private static LiteralArgumentBuilder<CommandSourceStack> createPokemonCommand() {
+        return Commands.literal("pokemon")
+
+                .then(Commands.literal("add")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("weight", IntegerArgumentType.integer(1))
+                                        .then(Commands.argument("properties", CobblemonCompat.pokemonPropertiesArgument())
+                                                .executes(context -> pokemonAdd(
+                                                        context.getSource(),
+                                                        StringArgumentType.getString(context, "id"),
+                                                        IntegerArgumentType.getInteger(context, "weight"),
+                                                        getRawArgument(context, "properties")
+                                                ))))))
+
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+
+                                /*
+                                 * Para remove usamos greedyString normal.
+                                 *
+                                 * No usamos CobblemonCompat.pokemonPropertiesArgument()
+                                 * porque aquí NO queremos sugerir todos los Pokémon existentes,
+                                 * sino solo los Pokémon que ya están agregados a esta zona.
+                                 */
+                                .then(Commands.argument("properties", StringArgumentType.greedyString())
+                                        .suggests(MMSpawnCommands::suggestConfiguredPokemonForZone)
+                                        .executes(context -> pokemonRemove(
                                                 context.getSource(),
-                                                com.mojang.brigadier.arguments.StringArgumentType.getString(context, "id")
-                                        ))))
-        );
+                                                StringArgumentType.getString(context, "id"),
+                                                getRawArgument(context, "properties")
+                                        )))));
     }
 
     /** Crea una zona nueva. Si lo ejecuta un jugador, también guarda su posición como centro. */
@@ -458,6 +529,141 @@ public class MMSpawnCommands {
 
         success(source, "Lista de mobs limpiada para " + id + ".");
         return 1;
+    }
+
+    /**
+     * Agrega un Pokémon de Cobblemon a una zona usando propiedades completas.
+     *
+     * Ejemplos:
+     * /mmspawn pokemon add zona 100 pikachu
+     * /mmspawn pokemon add zona 100 pikachu shiny
+     * /mmspawn pokemon add zona 100 pikachu level=25 shiny
+     * /mmspawn pokemon add zona 100 abra shiny ability=synchronize
+     */
+    private static int pokemonAdd(CommandSourceStack source, String id, int weight, String properties) {
+        SpawnZone zone = getZoneOrFail(source, id);
+
+        if (zone == null) {
+            return 0;
+        }
+
+        String cleanProperties = CobblemonCompat.normalizeProperties(properties);
+
+        if (cleanProperties.isBlank()) {
+            fail(source, "Debes indicar las propiedades del Pokémon. Ejemplo: pikachu level=25 shiny");
+            return 0;
+        }
+
+        String storedEntry = CobblemonCompat.toStoredPokemonEntry(cleanProperties);
+
+        zone.addMob(storedEntry, weight);
+        MMSpawnManager.save();
+
+        success(source, "Pokémon agregado a " + id + ": " + cleanProperties + " con peso " + weight + ".");
+        return 1;
+    }
+
+    /**
+     * Quita un Pokémon configurado de una zona.
+     *
+     * Debe escribirse igual que fue agregado.
+     *
+     * Ejemplo:
+     * /mmspawn pokemon remove zona pikachu level=25 shiny
+     */
+    private static int pokemonRemove(CommandSourceStack source, String id, String properties) {
+        SpawnZone zone = getZoneOrFail(source, id);
+
+        if (zone == null) {
+            return 0;
+        }
+
+        String cleanProperties = CobblemonCompat.normalizeProperties(properties);
+
+        if (cleanProperties.isBlank()) {
+            fail(source, "Debes indicar las propiedades del Pokémon a eliminar.");
+            return 0;
+        }
+
+        String storedEntry = CobblemonCompat.toStoredPokemonEntry(cleanProperties);
+
+        zone.removeMob(storedEntry);
+        MMSpawnManager.save();
+
+        success(source, "Pokémon eliminado de " + id + ": " + cleanProperties + ".");
+        return 1;
+    }
+
+    /**
+     * Sugiere solamente los Pokémon de Cobblemon que ya están configurados
+     * dentro de la zona indicada.
+     *
+     * Ejemplo:
+     * Si la zona tiene:
+     * cobblemon:pikachu
+     * cobblemon:pikachu level=25 shiny
+     * cobblemon:charizard level=50
+     *
+     * El comando sugerirá:
+     * pikachu
+     * pikachu level=25 shiny
+     * charizard level=50
+     */
+    private static CompletableFuture<Suggestions> suggestConfiguredPokemonForZone(
+            CommandContext<CommandSourceStack> context,
+            SuggestionsBuilder builder
+    ) {
+        String zoneId;
+
+        try {
+            zoneId = StringArgumentType.getString(context, "id");
+        } catch (IllegalArgumentException exception) {
+            return builder.buildFuture();
+        }
+
+        SpawnZone zone = MMSpawnManager.getZone(zoneId);
+
+        if (zone == null) {
+            return builder.buildFuture();
+        }
+
+        List<String> suggestions = new ArrayList<>();
+
+        for (SpawnMobEntry entry : zone.getMobs()) {
+            String entityId = entry.getEntityId();
+
+            if (!CobblemonCompat.isCobblemonPokemonEntry(entityId)) {
+                continue;
+            }
+
+            /*
+             * Convierte:
+             * cobblemon:pikachu level=25 shiny
+             *
+             * En:
+             * pikachu level=25 shiny
+             */
+            suggestions.add(CobblemonCompat.toPokemonProperties(entityId));
+        }
+
+        return SharedSuggestionProvider.suggest(suggestions, builder);
+    }
+
+    /**
+     * Obtiene el texto original escrito en un argumento de Brigadier.
+     *
+     * Esto es necesario porque el argumento de Cobblemon no devuelve String.
+     * Devuelve un objeto interno de Cobblemon, pero nosotros queremos guardar
+     * el texto exacto que escribió el admin.
+     */
+    private static String getRawArgument(CommandContext<CommandSourceStack> context, String argumentName) {
+        for (ParsedCommandNode<CommandSourceStack> node : context.getNodes()) {
+            if (node.getNode().getName().equals(argumentName)) {
+                return node.getRange().get(context.getInput()).trim();
+            }
+        }
+
+        return "";
     }
 
     /** Define cuántos mobs vivos como máximo puede mantener la zona. */
