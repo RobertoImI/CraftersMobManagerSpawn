@@ -1,5 +1,6 @@
 package org.crafterscr.craftersmobmanagerspawn.logic;
 
+import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
 
@@ -14,8 +15,10 @@ public class ManagedDropEvents {
     private ManagedDropEvents() {
     }
 
-    @SubscribeEvent
+    @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onLivingDeath(LivingDeathEvent event) {
-        MMSpawnManager.dropConfiguredRewards(event.getEntity());
+        if (!event.isCanceled()) {
+            MMSpawnManager.dropConfiguredRewards(event.getEntity());
+        }
     }
 }
