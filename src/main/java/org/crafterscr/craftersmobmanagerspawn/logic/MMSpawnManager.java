@@ -10,7 +10,10 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.item.Item;
+import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.AABB;
@@ -21,11 +24,13 @@ import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
 import org.crafterscr.craftersmobmanagerspawn.compat.CobblemonCompat;
 import org.crafterscr.craftersmobmanagerspawn.data.MMSpawnStorage;
+import org.crafterscr.craftersmobmanagerspawn.data.SpawnDropEntry;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnMobEntry;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnPointData;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnZone;
 import org.crafterscr.craftersmobmanagerspawn.util.RespawnMode;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -77,6 +82,13 @@ public class MMSpawnManager {
     // Etiqueta general que se agrega a todo mob creado por este mod.
     private static final String MANAGED_TAG = "mmspawn_managed";
 
+    /*
+     * Evita entregar dos veces la recompensa si un Pokémon dispara tanto un evento
+     * vanilla como BATTLE_FAINTED. Las entradas se purgan tras 10 minutos.
+     */
+    private static final Map<UUID, Long> PROCESSED_DROP_UUIDS = new LinkedHashMap<>();
+    private static final long PROCESSED_DROP_TTL_MILLIS = 10L * 60L * 1000L;
+
     // Referencia al servidor actual. Se usa para guardar el JSON desde otros métodos.
     private static MinecraftServer currentServer;
 
@@ -95,6 +107,10 @@ public class MMSpawnManager {
 
         VISUAL_TASKS.clear();
         PENDING_COBBLEMON_SPAWNS.clear();
+        PROCESSED_DROP_UUIDS.clear();
+
+        // Se registra aquí, con el servidor ya iniciado, para mantener Cobblemon opcional.
+        CobblemonCompat.registerBattleFaintedListener();
     }
 
     /**
@@ -111,6 +127,7 @@ public class MMSpawnManager {
         ZONES.clear();
         VISUAL_TASKS.clear();
         PENDING_COBBLEMON_SPAWNS.clear();
+        PROCESSED_DROP_UUIDS.clear();
     }
 
     /**
@@ -133,6 +150,7 @@ public class MMSpawnManager {
 
         // Primero resolvemos Pokémon pendientes para que cuenten antes de spawnear más.
         tickPendingCobblemonSpawns(server);
+        cleanupProcessedDropUuids();
 
         for (SpawnZone zone : ZONES.values()) {
             tickZone(server, zone);
@@ -492,6 +510,7 @@ public class MMSpawnManager {
 
             PendingCobblemonSpawn pending = new PendingCobblemonSpawn(
                     zone.getId(),
+                    entry.getEntityId(),
                     spawnVec,
                     beforeUuids,
                     level.getGameTime()
@@ -529,6 +548,7 @@ public class MMSpawnManager {
 
         entity.addTag(MANAGED_TAG);
         entity.addTag(getZoneTag(zone));
+        entity.addTag(getEntryTag(entry));
 
         if (entity instanceof Mob mob) {
             mob.setPersistenceRequired();
@@ -844,6 +864,11 @@ public class MMSpawnManager {
             entity.addTag(MANAGED_TAG);
             entity.addTag(getZoneTag(zone));
 
+            SpawnMobEntry entry = findEntryById(zone, pending.entryId);
+            if (entry != null) {
+                entity.addTag(getEntryTag(entry));
+            }
+
             if (!zone.getActiveMobUuids().contains(uuid)) {
                 zone.getActiveMobUuids().add(uuid);
             }
@@ -852,6 +877,149 @@ public class MMSpawnManager {
         }
 
         return false;
+    }
+
+    /**
+     * Entrega todos los drops configurados para una entidad administrada.
+     *
+     * Se llama únicamente desde una muerte real de NeoForge o desde BATTLE_FAINTED
+     * de Cobblemon. Entity#discard, /mmspawn clear y borrar zonas no pasan por aquí.
+     */
+    public static void dropConfiguredRewards(Entity entity) {
+        if (entity == null || !(entity.level() instanceof ServerLevel level)) {
+            return;
+        }
+
+        if (!entity.getTags().contains(MANAGED_TAG)) {
+            return;
+        }
+
+        SpawnZone zone = null;
+        for (SpawnZone candidate : ZONES.values()) {
+            if (entity.getTags().contains(getZoneTag(candidate))) {
+                zone = candidate;
+                break;
+            }
+        }
+
+        if (zone == null) {
+            return;
+        }
+
+        SpawnMobEntry entry = findEntryForTaggedEntity(zone, entity);
+
+        if (entry == null || entry.getDrops().isEmpty()) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        Long previous = PROCESSED_DROP_UUIDS.putIfAbsent(entity.getUUID(), now);
+
+        if (previous != null) {
+            return;
+        }
+
+        for (SpawnDropEntry drop : entry.getDrops()) {
+            ResourceLocation itemId;
+
+            try {
+                itemId = ResourceLocation.parse(drop.getItemId());
+            } catch (Exception ignored) {
+                continue;
+            }
+
+            Optional<Item> optionalItem = BuiltInRegistries.ITEM.getOptional(itemId);
+
+            if (optionalItem.isEmpty() || optionalItem.get() == net.minecraft.world.item.Items.AIR) {
+                continue;
+            }
+
+            Item item = optionalItem.get();
+            int remaining = Math.max(1, drop.getCount());
+
+            while (remaining > 0) {
+                ItemStack stack = new ItemStack(item, 1);
+                int amount = Math.min(remaining, stack.getMaxStackSize());
+                stack.setCount(amount);
+
+                ItemEntity itemEntity = new ItemEntity(
+                        level,
+                        entity.getX(),
+                        entity.getY() + 0.25D,
+                        entity.getZ(),
+                        stack
+                );
+                itemEntity.setDefaultPickUpDelay();
+                level.addFreshEntity(itemEntity);
+
+                remaining -= amount;
+            }
+        }
+    }
+
+    private static SpawnMobEntry findEntryForTaggedEntity(SpawnZone zone, Entity entity) {
+        for (SpawnMobEntry entry : zone.getMobs()) {
+            if (entity.getTags().contains(getEntryTag(entry))) {
+                return entry;
+            }
+        }
+
+        /*
+         * Fallback para mobs normales que hayan quedado vivos desde una versión anterior
+         * del mod, cuando todavía no existía la etiqueta de entrada.
+         */
+        String actualEntityId = BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString();
+
+        if (!"cobblemon:pokemon".equals(actualEntityId)) {
+            for (SpawnMobEntry entry : zone.getMobs()) {
+                if (entry.getEntityId().equalsIgnoreCase(actualEntityId)) {
+                    return entry;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static SpawnMobEntry findEntryById(SpawnZone zone, String entryId) {
+        if (entryId == null) {
+            return null;
+        }
+
+        for (SpawnMobEntry entry : zone.getMobs()) {
+            if (entry.getEntityId().equalsIgnoreCase(entryId)) {
+                return entry;
+            }
+        }
+
+        return null;
+    }
+
+    private static String getEntryTag(SpawnMobEntry entry) {
+        UUID stableId = UUID.nameUUIDFromBytes(
+                entry.getEntityId().toLowerCase(java.util.Locale.ROOT).getBytes(StandardCharsets.UTF_8)
+        );
+        return "mmspawn_entry_" + stableId.toString().replace("-", "");
+    }
+
+    private static void cleanupProcessedDropUuids() {
+        long cutoff = System.currentTimeMillis() - PROCESSED_DROP_TTL_MILLIS;
+        PROCESSED_DROP_UUIDS.entrySet().removeIf(entry -> entry.getValue() < cutoff);
+    }
+
+    public static boolean isValidItemId(ResourceLocation itemId) {
+        Optional<Item> item = BuiltInRegistries.ITEM.getOptional(itemId);
+        return item.isPresent() && item.get() != net.minecraft.world.item.Items.AIR;
+    }
+
+    public static List<String> getItemIds() {
+        return BuiltInRegistries.ITEM
+                .keySet()
+                .stream()
+                .map(ResourceLocation::toString)
+                .filter(id -> !"minecraft:air".equals(id))
+                .sorted(Comparator.naturalOrder())
+                .toList();
     }
 
     public static List<String> getEntityIds() {
@@ -908,12 +1076,14 @@ public class MMSpawnManager {
 
     private static class PendingCobblemonSpawn {
         private final String zoneId;
+        private final String entryId;
         private final Vec3 position;
         private final Set<UUID> beforeUuids;
         private final long createdTick;
 
-        private PendingCobblemonSpawn(String zoneId, Vec3 position, Set<UUID> beforeUuids, long createdTick) {
+        private PendingCobblemonSpawn(String zoneId, String entryId, Vec3 position, Set<UUID> beforeUuids, long createdTick) {
             this.zoneId = zoneId;
+            this.entryId = entryId;
             this.position = position;
             this.beforeUuids = beforeUuids;
             this.createdTick = createdTick;
