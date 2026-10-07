@@ -279,7 +279,18 @@ public class CobblemonCompat {
             }
 
             Class<?> priorityClass = Class.forName("com.cobblemon.mod.common.api.Priority");
-            Object normalPriority = Enum.valueOf((Class<? extends Enum>) priorityClass.asSubclass(Enum.class), "NORMAL");
+            Object normalPriority = null;
+
+            for (Object constant : priorityClass.getEnumConstants()) {
+                if (constant instanceof Enum<?> enumConstant && enumConstant.name().equals("NORMAL")) {
+                    normalPriority = constant;
+                    break;
+                }
+            }
+
+            if (normalPriority == null) {
+                throw new IllegalStateException("No se encontró Priority.NORMAL de Cobblemon.");
+            }
 
             Class<?> handlerType = subscribeMethod.getParameterTypes()[1];
 
