@@ -20,6 +20,7 @@ import net.minecraft.server.level.ServerPlayer;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 import org.crafterscr.craftersmobmanagerspawn.compat.CobblemonCompat;
+import org.crafterscr.craftersmobmanagerspawn.data.SpawnDropEntry;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnMobEntry;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnPointData;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnZone;
@@ -187,6 +188,7 @@ public class MMSpawnCommands {
                                                 context.getSource(),
                                                 StringArgumentType.getString(context, "id")
                                         )))))
+                        .then(createMobDropCommand())
 
                 .then(Commands.literal("max")
                         .then(Commands.argument("id", StringArgumentType.word())
@@ -321,7 +323,112 @@ public class MMSpawnCommands {
                                 .executes(context -> pokemonList(
                                         context.getSource(),
                                         StringArgumentType.getString(context, "id")
-                                ))));
+                                ))))
+                .then(createPokemonDropCommand());
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> createMobDropCommand() {
+        return Commands.literal("drop")
+                .then(Commands.literal("add")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("entity", ResourceLocationArgument.id())
+                                        .suggests(MMSpawnCommands::suggestConfiguredNormalMobsForZone)
+                                        .then(Commands.argument("item", ResourceLocationArgument.id())
+                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getItemIds(), builder))
+                                                .then(Commands.argument("count", IntegerArgumentType.integer(1))
+                                                        .executes(context -> mobDropAdd(
+                                                                context.getSource(),
+                                                                StringArgumentType.getString(context, "id"),
+                                                                ResourceLocationArgument.getId(context, "entity"),
+                                                                ResourceLocationArgument.getId(context, "item"),
+                                                                IntegerArgumentType.getInteger(context, "count")
+                                                        )))))))
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("entity", ResourceLocationArgument.id())
+                                        .suggests(MMSpawnCommands::suggestConfiguredNormalMobsForZone)
+                                        .then(Commands.argument("item", ResourceLocationArgument.id())
+                                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getItemIds(), builder))
+                                                .executes(context -> mobDropRemove(
+                                                        context.getSource(),
+                                                        StringArgumentType.getString(context, "id"),
+                                                        ResourceLocationArgument.getId(context, "entity"),
+                                                        ResourceLocationArgument.getId(context, "item")
+                                                ))))))
+                .then(Commands.literal("list")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("entity", ResourceLocationArgument.id())
+                                        .suggests(MMSpawnCommands::suggestConfiguredNormalMobsForZone)
+                                        .executes(context -> mobDropList(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                ResourceLocationArgument.getId(context, "entity")
+                                        )))))
+                .then(Commands.literal("clear")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("entity", ResourceLocationArgument.id())
+                                        .suggests(MMSpawnCommands::suggestConfiguredNormalMobsForZone)
+                                        .executes(context -> mobDropClear(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                ResourceLocationArgument.getId(context, "entity")
+                                        )))));
+    }
+
+    private static LiteralArgumentBuilder<CommandSourceStack> createPokemonDropCommand() {
+        return Commands.literal("drop")
+                .then(Commands.literal("add")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("item", ResourceLocationArgument.id())
+                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getItemIds(), builder))
+                                        .then(Commands.argument("count", IntegerArgumentType.integer(1))
+                                                .then(Commands.argument("properties", StringArgumentType.greedyString())
+                                                        .suggests(MMSpawnCommands::suggestConfiguredPokemonForZone)
+                                                        .executes(context -> pokemonDropAdd(
+                                                                context.getSource(),
+                                                                StringArgumentType.getString(context, "id"),
+                                                                ResourceLocationArgument.getId(context, "item"),
+                                                                IntegerArgumentType.getInteger(context, "count"),
+                                                                getRawArgument(context, "properties")
+                                                        )))))))
+                .then(Commands.literal("remove")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("item", ResourceLocationArgument.id())
+                                        .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getItemIds(), builder))
+                                        .then(Commands.argument("properties", StringArgumentType.greedyString())
+                                                .suggests(MMSpawnCommands::suggestConfiguredPokemonForZone)
+                                                .executes(context -> pokemonDropRemove(
+                                                        context.getSource(),
+                                                        StringArgumentType.getString(context, "id"),
+                                                        ResourceLocationArgument.getId(context, "item"),
+                                                        getRawArgument(context, "properties")
+                                                ))))))
+                .then(Commands.literal("list")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("properties", StringArgumentType.greedyString())
+                                        .suggests(MMSpawnCommands::suggestConfiguredPokemonForZone)
+                                        .executes(context -> pokemonDropList(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                getRawArgument(context, "properties")
+                                        )))))
+                .then(Commands.literal("clear")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.argument("properties", StringArgumentType.greedyString())
+                                        .suggests(MMSpawnCommands::suggestConfiguredPokemonForZone)
+                                        .executes(context -> pokemonDropClear(
+                                                context.getSource(),
+                                                StringArgumentType.getString(context, "id"),
+                                                getRawArgument(context, "properties")
+                                        )))));
     }
 
     private static int create(CommandSourceStack source, String id) {
@@ -641,6 +748,179 @@ public class MMSpawnCommands {
         }
 
         return "";
+    }
+
+    private static int mobDropAdd(CommandSourceStack source, String id, ResourceLocation entityId, ResourceLocation itemId, int count) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = findConfiguredEntry(zone, entityId.toString(), false);
+        if (entry == null) {
+            fail(source, "Ese mob no está configurado en la zona: " + entityId);
+            return 0;
+        }
+
+        if (!MMSpawnManager.isValidItemId(itemId)) {
+            fail(source, "Item inválido o no registrado: " + itemId);
+            return 0;
+        }
+
+        entry.addDrop(itemId.toString(), count);
+        MMSpawnManager.save();
+        success(source, "Drop garantizado agregado: " + count + "x " + itemId + " para " + entityId + ".");
+        return 1;
+    }
+
+    private static int mobDropRemove(CommandSourceStack source, String id, ResourceLocation entityId, ResourceLocation itemId) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = findConfiguredEntry(zone, entityId.toString(), false);
+        if (entry == null) {
+            fail(source, "Ese mob no está configurado en la zona: " + entityId);
+            return 0;
+        }
+
+        if (!entry.removeDrop(itemId.toString())) {
+            fail(source, "Ese drop no estaba configurado: " + itemId);
+            return 0;
+        }
+
+        MMSpawnManager.save();
+        success(source, "Drop eliminado de " + entityId + ": " + itemId + ".");
+        return 1;
+    }
+
+    private static int mobDropList(CommandSourceStack source, String id, ResourceLocation entityId) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = findConfiguredEntry(zone, entityId.toString(), false);
+        if (entry == null) {
+            fail(source, "Ese mob no está configurado en la zona: " + entityId);
+            return 0;
+        }
+
+        return showDrops(source, entityId.toString(), entry);
+    }
+
+    private static int mobDropClear(CommandSourceStack source, String id, ResourceLocation entityId) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = findConfiguredEntry(zone, entityId.toString(), false);
+        if (entry == null) {
+            fail(source, "Ese mob no está configurado en la zona: " + entityId);
+            return 0;
+        }
+
+        entry.clearDrops();
+        MMSpawnManager.save();
+        success(source, "Drops limpiados para " + entityId + ".");
+        return 1;
+    }
+
+    private static int pokemonDropAdd(CommandSourceStack source, String id, ResourceLocation itemId, int count, String properties) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = getPokemonEntryOrFail(source, zone, properties);
+        if (entry == null) return 0;
+
+        if (!MMSpawnManager.isValidItemId(itemId)) {
+            fail(source, "Item inválido o no registrado: " + itemId);
+            return 0;
+        }
+
+        entry.addDrop(itemId.toString(), count);
+        MMSpawnManager.save();
+        success(source, "Drop garantizado agregado: " + count + "x " + itemId + " para " + CobblemonCompat.toPokemonProperties(entry.getEntityId()) + ".");
+        return 1;
+    }
+
+    private static int pokemonDropRemove(CommandSourceStack source, String id, ResourceLocation itemId, String properties) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = getPokemonEntryOrFail(source, zone, properties);
+        if (entry == null) return 0;
+
+        if (!entry.removeDrop(itemId.toString())) {
+            fail(source, "Ese drop no estaba configurado: " + itemId);
+            return 0;
+        }
+
+        MMSpawnManager.save();
+        success(source, "Drop eliminado: " + itemId + ".");
+        return 1;
+    }
+
+    private static int pokemonDropList(CommandSourceStack source, String id, String properties) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = getPokemonEntryOrFail(source, zone, properties);
+        if (entry == null) return 0;
+
+        return showDrops(source, CobblemonCompat.toPokemonProperties(entry.getEntityId()), entry);
+    }
+
+    private static int pokemonDropClear(CommandSourceStack source, String id, String properties) {
+        SpawnZone zone = getZoneOrFail(source, id);
+        if (zone == null) return 0;
+
+        SpawnMobEntry entry = getPokemonEntryOrFail(source, zone, properties);
+        if (entry == null) return 0;
+
+        entry.clearDrops();
+        MMSpawnManager.save();
+        success(source, "Drops limpiados para " + CobblemonCompat.toPokemonProperties(entry.getEntityId()) + ".");
+        return 1;
+    }
+
+    private static SpawnMobEntry getPokemonEntryOrFail(CommandSourceStack source, SpawnZone zone, String properties) {
+        String clean = CobblemonCompat.normalizeProperties(properties);
+
+        if (clean.isBlank()) {
+            fail(source, "Debes indicar el Pokémon configurado.");
+            return null;
+        }
+
+        String storedEntry = CobblemonCompat.toStoredPokemonEntry(clean);
+        SpawnMobEntry entry = findConfiguredEntry(zone, storedEntry, true);
+
+        if (entry == null) {
+            fail(source, "Ese Pokémon no está configurado exactamente en la zona: " + clean);
+        }
+
+        return entry;
+    }
+
+    private static SpawnMobEntry findConfiguredEntry(SpawnZone zone, String entityId, boolean pokemon) {
+        for (SpawnMobEntry entry : zone.getMobs()) {
+            boolean isPokemon = CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId());
+
+            if (isPokemon == pokemon && entry.getEntityId().equalsIgnoreCase(entityId)) {
+                return entry;
+            }
+        }
+
+        return null;
+    }
+
+    private static int showDrops(CommandSourceStack source, String displayName, SpawnMobEntry entry) {
+        if (entry.getDrops().isEmpty()) {
+            success(source, "No hay drops configurados para " + displayName + ".");
+            return 1;
+        }
+
+        success(source, "Drops garantizados de " + displayName + ":");
+
+        for (SpawnDropEntry drop : entry.getDrops()) {
+            success(source, "- " + drop.getCount() + "x " + drop.getItemId());
+        }
+
+        return 1;
     }
 
     private static int setMax(CommandSourceStack source, String id, int value) {
