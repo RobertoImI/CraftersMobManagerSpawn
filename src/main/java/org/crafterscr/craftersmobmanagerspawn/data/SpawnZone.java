@@ -290,7 +290,14 @@ public class SpawnZone {
      * Si ya existía ese mismo entityId, lo reemplaza con el nuevo peso.
      */
     public void addMob(String entityId, int weight) {
-        mobs.removeIf(entry -> entry.getEntityId().equalsIgnoreCase(entityId));
+        for (SpawnMobEntry entry : mobs) {
+            if (entry.getEntityId().equalsIgnoreCase(entityId)) {
+                // Actualizar el peso no debe borrar los drops ya configurados.
+                entry.setWeight(weight);
+                return;
+            }
+        }
+
         mobs.add(new SpawnMobEntry(entityId, Math.max(1, weight)));
     }
 
