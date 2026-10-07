@@ -187,8 +187,8 @@ public class MMSpawnCommands {
                                         .executes(context -> mobClear(
                                                 context.getSource(),
                                                 StringArgumentType.getString(context, "id")
-                                        )))))
-                        .then(createMobDropCommand())
+                                        ))))
+                        .then(createMobDropCommand()))
 
                 .then(Commands.literal("max")
                         .then(Commands.argument("id", StringArgumentType.word())
