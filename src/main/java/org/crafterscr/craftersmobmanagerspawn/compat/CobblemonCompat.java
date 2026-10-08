@@ -342,6 +342,8 @@ public class CobblemonCompat {
             );
 
             subscribe.invoke(observable, normalPriority, handler);
+            org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.info(
+                    "MMSpawn: listener Cobblemon {} registrado correctamente", eventField);
             return true;
         } catch (Throwable throwable) {
             System.err.println("[MMSpawn] No se pudo registrar " + eventField + " de Cobblemon");
@@ -444,11 +446,64 @@ public class CobblemonCompat {
         }
 
         UUID battleId = (UUID) invokeNoArgs(battle, "getBattleId");
+        boolean capture = Boolean.TRUE.equals(captureObject);
+
+        // CORRECCIÓN: BATTLE_FAINTED no siempre puede identificar el Pokémon (se
+        // retira su entidad y algunos complementos clonan el objeto Pokemon).
+        // BATTLE_VICTORY incluye a los actores derrotados y a sus Pokémon,
+        // por lo que constituye una segunda ruta confiable.
+        if (!capture && losersObject instanceof Iterable<?> losers) {
+            for (Object loser : losers) {
+                if (!"WILD".equals(String.valueOf(invokeNoArgs(loser, "getType")))) {
+                    continue;
+                }
+                UUID defeatedActorId = uuidOf(loser);
+                Object pokemonList = invokeNoArgs(loser, "getPokemonList");
+                if (!(pokemonList instanceof Iterable<?> defeatedPokemon)) {
+                    continue;
+                }
+                for (Object battlePokemon : defeatedPokemon) {
+                    Object health = invokeNoArgs(battlePokemon, "getHealth");
+                    if (!(health instanceof Number n) || n.intValue() > 0) {
+                        continue;
+                    }
+
+                    Object effected = invokeNoArgs(battlePokemon, "getEffectedPokemon");
+                    Object original = invokeNoArgs(battlePokemon, "getOriginalPokemon");
+                    Component name = Component.literal("Pokémon");
+                    if (effected != null) {
+                        Object nameObject = invokeNoArgs(effected, "getDisplayName");
+                        if (nameObject instanceof Component component) {
+                            name = component;
+                        }
+                    }
+
+                    for (Object candidate : new Object[]{original, effected}) {
+                        if (candidate == null) {
+                            continue;
+                        }
+                        Object possibleUuid = invokeNoArgs(candidate, "getUuid");
+                        if (possibleUuid instanceof UUID pokemonUuid) {
+                            MMSpawnManager.queuePokemonBattleRewardByPokemonUuid(
+                                    battleId, pokemonUuid, defeatedActorId, null, name);
+                        }
+
+                        // Recuperación adicional cuando la entidad todavía existe.
+                        Object possibleEntity = invokeNoArgs(candidate, "getEntity");
+                        if (possibleEntity instanceof Entity entity) {
+                            MMSpawnManager.queuePokemonBattleReward(
+                                    battleId, entity, defeatedActorId, null, name);
+                        }
+                    }
+                }
+            }
+        }
+
+        org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.info(
+                "MMSpawn: BATTLE_VICTORY {} | ganadores jugadores={} | actores vencidos={} | captura={}",
+                battleId, winnerPlayerIds.size(), losingActorIds.size(), capture);
         MMSpawnManager.completePokemonBattleRewards(
-                battleId,
-                winnerPlayerIds,
-                losingActorIds,
-                Boolean.TRUE.equals(captureObject)
+                battleId, winnerPlayerIds, losingActorIds, capture
         );
     }
 
