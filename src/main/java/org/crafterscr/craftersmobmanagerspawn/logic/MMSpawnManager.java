@@ -1223,10 +1223,10 @@ public class MMSpawnManager {
                         player.getInventory().add(stack);
                     }
 
-                    // Los sobrantes se crean como ItemEntity de servidor, no con
-                    // Player.drop (que puede estar cancelado por otros mods).
-                    // setTarget establece el propietario de recogida en 1.21.1:
-                    // sólo el vencedor puede recoger estos objetos.
+                    // Los sobrantes aparecen como drops públicos normales.
+                    // Guardamos el UUID del destinatario original en una etiqueta
+                    // persistente de la entidad SOLO para trazabilidad; NO usamos
+                    // setTarget/setOwner, pues restringirían quién puede recogerla.
                     if (!stack.isEmpty()) {
                         ItemEntity overflow = new ItemEntity(
                                 player.serverLevel(),
@@ -1235,7 +1235,7 @@ public class MMSpawnManager {
                                 player.getZ(),
                                 stack.copy()
                         );
-                        overflow.setTarget(player.getUUID());
+                        overflow.addTag("mmspawn_reward_for_" + player.getUUID().toString().replace("-", ""));
                         overflow.setDefaultPickUpDelay();
                         if (!player.serverLevel().addFreshEntity(overflow)) {
                             CraftersMobManagerSpawn.LOGGER.error(
