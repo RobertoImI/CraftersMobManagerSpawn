@@ -97,6 +97,10 @@ public class MMSpawnManager {
     private static final Map<UUID, List<PendingPokemonBattleReward>> PENDING_BATTLE_REWARDS = new LinkedHashMap<>();
     private static final long BATTLE_REWARD_TTL_MILLIS = 30L * 60L * 1000L;
 
+    // Identidad propia del Pokémon != UUID de la entidad Minecraft. Sobrevive al retiro
+    // temporal de PokemonEntity durante combate.
+    private static final Map<UUID, TrackedPokemonSpawn> TRACKED_POKEMON = new LinkedHashMap<>();
+
     // Referencia al servidor actual. Se usa para guardar el JSON desde otros métodos.
     private static MinecraftServer currentServer;
 
@@ -117,6 +121,7 @@ public class MMSpawnManager {
         PENDING_COBBLEMON_SPAWNS.clear();
         PROCESSED_DROP_UUIDS.clear();
         PENDING_BATTLE_REWARDS.clear();
+        TRACKED_POKEMON.clear();
 
         // Se registra aquí, con el servidor ya iniciado, para mantener Cobblemon opcional.
         CobblemonCompat.registerBattleFaintedListener();
@@ -138,6 +143,7 @@ public class MMSpawnManager {
         PENDING_COBBLEMON_SPAWNS.clear();
         PROCESSED_DROP_UUIDS.clear();
         PENDING_BATTLE_REWARDS.clear();
+        TRACKED_POKEMON.clear();
     }
 
     /**
@@ -162,6 +168,7 @@ public class MMSpawnManager {
         tickPendingCobblemonSpawns(server);
         cleanupProcessedDropUuids();
         cleanupExpiredBattleRewards();
+        cleanupTrackedPokemon();
 
         for (SpawnZone zone : ZONES.values()) {
             tickZone(server, zone);
@@ -740,6 +747,7 @@ public class MMSpawnManager {
             if (!zone.getActiveMobUuids().contains(uuid)) {
                 zone.getActiveMobUuids().add(uuid);
             }
+            trackPokemonIdentity(entity, zone);
         }
     }
 
@@ -900,6 +908,7 @@ public class MMSpawnManager {
                 zone.getActiveMobUuids().add(uuid);
             }
 
+            trackPokemonIdentity(entity, zone);
             return true;
         }
 
@@ -982,6 +991,86 @@ public class MMSpawnManager {
                 remaining -= amount;
             }
         }
+    }
+
+    /**
+     * Asocia el UUID interno de Cobblemon con una entrada concreta de zona.
+     * Mantiene el dato aunque la entidad deje de existir durante BATTLE_FAINTED.
+     */
+    private static void trackPokemonIdentity(Entity entity, SpawnZone zone) {
+        if (!entity.getTags().contains(MANAGED_TAG)
+                || !"cobblemon:pokemon".equals(BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString())) {
+            return;
+        }
+
+        SpawnMobEntry entry = findEntryForTaggedEntity(zone, entity);
+        if (entry == null || !CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
+            return;
+        }
+
+        UUID pokemonUuid = CobblemonCompat.getPokemonUuidFromEntity(entity);
+        if (pokemonUuid != null) {
+            TRACKED_POKEMON.put(pokemonUuid, new TrackedPokemonSpawn(
+                    entity.getUUID(), zone.getId(), entry.getEntityId(), System.currentTimeMillis()
+            ));
+        }
+    }
+
+    private static void cleanupTrackedPokemon() {
+        // Cobblemon puede retirar del mundo a sus entidades al entrar en batalla.
+        // No borramos la asociación inmediatamente cuando dejan de estar presentes.
+        long cutoff = System.currentTimeMillis() - BATTLE_REWARD_TTL_MILLIS;
+        TRACKED_POKEMON.entrySet().removeIf(entry -> entry.getValue().trackedAt() < cutoff);
+    }
+
+    public static void queuePokemonBattleRewardByPokemonUuid(
+            UUID battleId, UUID pokemonUuid, UUID defeatedActorId,
+            UUID attackerPlayerId, Component pokemonName
+    ) {
+        if (battleId == null || pokemonUuid == null) {
+            return;
+        }
+
+        TrackedPokemonSpawn tracked = TRACKED_POKEMON.get(pokemonUuid);
+        if (tracked == null) {
+            CraftersMobManagerSpawn.LOGGER.debug(
+                    "Faint Pokémon {} ignorado: no pertenece a una zona MMSpawn registrada", pokemonUuid);
+            return;
+        }
+
+        SpawnZone zone = ZONES.get(tracked.zoneId());
+        SpawnMobEntry entry = zone == null ? null : findEntryById(zone, tracked.entryId());
+        if (entry == null || PROCESSED_DROP_UUIDS.containsKey(tracked.entityId())) {
+            return;
+        }
+
+        List<PendingPokemonBattleReward> pending =
+                PENDING_BATTLE_REWARDS.computeIfAbsent(battleId, ignored -> new ArrayList<>());
+
+        for (PendingPokemonBattleReward previous : pending) {
+            if (previous.entityId().equals(tracked.entityId())) {
+                return;
+            }
+        }
+
+        List<SpawnDropEntry> drops = new ArrayList<>();
+        for (SpawnDropEntry drop : entry.getDrops()) {
+            if (drop.getItemId() != null) {
+                drops.add(new SpawnDropEntry(drop.getItemId(), drop.getCount()));
+            }
+        }
+
+        pending.add(new PendingPokemonBattleReward(
+                tracked.entityId(), defeatedActorId, attackerPlayerId,
+                pokemonName == null ? Component.literal("Pokémon") : pokemonName.copy(),
+                drops, System.currentTimeMillis()
+        ));
+        CraftersMobManagerSpawn.LOGGER.info(
+                "MMSpawn: faint registrado para {} en combate {}; premios configurados: {}",
+                pokemonName == null ? pokemonUuid : pokemonName.getString(), battleId, drops.size());
+    }
+
+    private record TrackedPokemonSpawn(UUID entityId, String zoneId, String entryId, long trackedAt) {
     }
 
     /**
