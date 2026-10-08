@@ -1010,10 +1010,24 @@ public class MMSpawnManager {
 
         UUID pokemonUuid = CobblemonCompat.getPokemonUuidFromEntity(entity);
         if (pokemonUuid != null) {
-            TRACKED_POKEMON.put(pokemonUuid, new TrackedPokemonSpawn(
+            TrackedPokemonSpawn previous = TRACKED_POKEMON.put(pokemonUuid, new TrackedPokemonSpawn(
                     entity.getUUID(), zone.getId(), entry.getEntityId(), System.currentTimeMillis()
             ));
+            if (previous == null || !previous.entityId().equals(entity.getUUID())) {
+                CraftersMobManagerSpawn.LOGGER.info(
+                        "MMSpawn: Pokémon vinculado a zona={} entrada={} pokemonUUID={}",
+                        zone.getId(), entry.getEntityId(), pokemonUuid
+                );
+            }
         }
+    }
+
+    public static int getTrackedPokemonCount() {
+        return TRACKED_POKEMON.size();
+    }
+
+    public static int getPendingPokemonRewardCount() {
+        return PENDING_BATTLE_REWARDS.values().stream().mapToInt(List::size).sum();
     }
 
     private static void cleanupTrackedPokemon() {
@@ -1146,6 +1160,11 @@ public class MMSpawnManager {
         List<PendingPokemonBattleReward> rewards = PENDING_BATTLE_REWARDS.remove(battleId);
         if (rewards == null || rewards.isEmpty() || wasWildCapture
                 || winnerPlayerIds == null || winnerPlayerIds.isEmpty() || currentServer == null) {
+            CraftersMobManagerSpawn.LOGGER.debug(
+                    "MMSpawn: victoria {} sin premios: registros={}, captura={}, jugadores ganadores={}",
+                    battleId, rewards == null ? 0 : rewards.size(),
+                    wasWildCapture, winnerPlayerIds == null ? 0 : winnerPlayerIds.size()
+            );
             return;
         }
 
