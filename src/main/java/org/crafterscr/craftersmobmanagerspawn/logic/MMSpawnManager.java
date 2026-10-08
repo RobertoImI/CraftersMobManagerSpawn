@@ -1214,14 +1214,10 @@ public class MMSpawnManager {
                     int amount = Math.min(remaining, stack.getMaxStackSize());
                     stack.setCount(amount);
 
-                    // La inserción consume sólo la cantidad que realmente cabe.
-                    // Si no existe ningún hueco ni una pila compatible, no llamar a
-                    // Inventory.add: en creativo podría consumir el stack sin guardarlo.
-                    boolean canFit = player.getInventory().getFreeSlot() >= 0
-                            || player.getInventory().getSlotWithRemainingSpace(stack) >= 0;
-                    if (canFit) {
-                        player.getInventory().add(stack);
-                    }
+                    // Insertar explícitamente sólo lo que realmente cabe en el
+                    // inventario principal. Inventory.add puede vaciar el stack
+                    // en creativo incluso si el inventario está lleno.
+                    stack = insertRewardIntoInventory(player, stack);
 
                     // Los sobrantes aparecen como drops públicos normales.
                     // Guardamos el UUID del destinatario original en una etiqueta
@@ -1236,7 +1232,9 @@ public class MMSpawnManager {
                                 stack.copy()
                         );
                         overflow.addTag("mmspawn_reward_for_" + player.getUUID().toString().replace("-", ""));
-                        overflow.setDefaultPickUpDelay();
+                        // Da tiempo a que la entidad aparezca y evita su recogida
+                        // inmediata al generarse sobre el jugador.
+                        overflow.setPickUpDelay(40);
                         if (!player.serverLevel().addFreshEntity(overflow)) {
                             CraftersMobManagerSpawn.LOGGER.error(
                                     "MMSpawn: no se pudo generar un premio sobrante para {}: {}x {}",
@@ -1256,6 +1254,48 @@ public class MMSpawnManager {
                     .append(reward.pokemonName().copy().withStyle(ChatFormatting.YELLOW));
             currentServer.getPlayerList().broadcastSystemMessage(announcement, false);
         }
+    }
+
+    /**
+     * Inserta recompensas sin la excepción del modo creativo que puede
+     * consumir ItemStacks sobrantes sin crear un objeto visible.
+     *
+     * Devuelve una pila nueva con la cantidad exacta que NO cupo.
+     * Recorre exclusivamente los 36 slots principales (incluida hotbar).
+     */
+    private static ItemStack insertRewardIntoInventory(ServerPlayer player, ItemStack reward) {
+        ItemStack leftover = reward.copy();
+        var inventory = player.getInventory();
+
+        // 1) Completar pilas compatibles existentes.
+        for (int slot = 0; slot < inventory.items.size() && !leftover.isEmpty(); slot++) {
+            ItemStack inSlot = inventory.items.get(slot);
+            if (inSlot.isEmpty() || !ItemStack.isSameItemSameComponents(inSlot, leftover)) {
+                continue;
+            }
+
+            int room = Math.max(0, inSlot.getMaxStackSize() - inSlot.getCount());
+            if (room > 0) {
+                int moved = Math.min(room, leftover.getCount());
+                inSlot.grow(moved);
+                leftover.shrink(moved);
+            }
+        }
+
+        // 2) Llenar slots principales vacíos, respetando el máximo por pila.
+        for (int slot = 0; slot < inventory.items.size() && !leftover.isEmpty(); slot++) {
+            if (!inventory.items.get(slot).isEmpty()) {
+                continue;
+            }
+
+            int moved = Math.min(leftover.getCount(), leftover.getMaxStackSize());
+            inventory.setItem(slot, leftover.copyWithCount(moved));
+            leftover.shrink(moved);
+        }
+
+        inventory.setChanged();
+        player.containerMenu.broadcastChanges();
+        return leftover;
     }
 
     private static void cleanupExpiredBattleRewards() {
