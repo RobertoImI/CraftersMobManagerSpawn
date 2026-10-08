@@ -5,6 +5,8 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.AABB;
@@ -14,8 +16,11 @@ import net.neoforged.fml.ModList;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -37,6 +42,7 @@ public class CobblemonCompat {
 
     // Se registra una sola vez por proceso. Cobblemon mantiene el listener en su observable global.
     private static boolean battleFaintedListenerRegistered = false;
+    private static boolean battleVictoryListenerRegistered = false;
 
     private CobblemonCompat() {
     }
@@ -252,113 +258,195 @@ public class CobblemonCompat {
     }
 
     /**
-     * Suscribe el sistema de drops al BATTLE_FAINTED real de Cobblemon sin enlazar
-     * clases de Cobblemon durante compilación. De esta forma Cobblemon sigue siendo opcional.
+     * Compatibilidad sin dependencia de compilación: escucha BATTLE_FAINTED
+     * para recordar qué Pokémon cayó y BATTLE_VICTORY para confirmar el ganador.
      */
-    @SuppressWarnings({"unchecked", "rawtypes"})
     public static synchronized void registerBattleFaintedListener() {
-        if (battleFaintedListenerRegistered || !isCobblemonLoaded()) {
+        if (!isCobblemonLoaded()) {
             return;
         }
 
+        if (!battleFaintedListenerRegistered) {
+            battleFaintedListenerRegistered = subscribeBattleEvent("BATTLE_FAINTED", CobblemonCompat::handleBattleFainted);
+        }
+
+        if (!battleVictoryListenerRegistered) {
+            battleVictoryListenerRegistered = subscribeBattleEvent("BATTLE_VICTORY", CobblemonCompat::handleBattleVictory);
+        }
+    }
+
+    @FunctionalInterface
+    private interface CobblemonBattleEventHandler {
+        void accept(Object event) throws Exception;
+    }
+
+    /**
+     * Cobblemon ofrece EventObservable.subscribe(Priority, Function1).
+     * El proxy implementa Function1 sin enlazar ninguna clase del mod en Java.
+     */
+    private static boolean subscribeBattleEvent(String eventField, CobblemonBattleEventHandler callback) {
         try {
             Class<?> eventsClass = Class.forName("com.cobblemon.mod.common.api.events.CobblemonEvents");
-            Object battleFaintedObservable = eventsClass.getField("BATTLE_FAINTED").get(null);
+            Object observable = eventsClass.getField(eventField).get(null);
 
-            Method subscribeMethod = null;
-
-            for (Method method : battleFaintedObservable.getClass().getMethods()) {
-                if (method.getName().equals("subscribe") && method.getParameterCount() == 2) {
-                    subscribeMethod = method;
+            Method subscribe = null;
+            for (Method method : observable.getClass().getMethods()) {
+                if (method.getName().equals("subscribe") && method.getParameterCount() == 2
+                        && method.getParameterTypes()[1].getName().equals("kotlin.jvm.functions.Function1")) {
+                    subscribe = method;
                     break;
                 }
             }
 
-            if (subscribeMethod == null) {
-                throw new IllegalStateException("No se encontró Observable.subscribe(Priority, handler) de Cobblemon.");
+            if (subscribe == null) {
+                throw new IllegalStateException("Cobblemon no expone subscribe(Priority, Function1) para " + eventField);
             }
 
             Class<?> priorityClass = Class.forName("com.cobblemon.mod.common.api.Priority");
             Object normalPriority = null;
-
             for (Object constant : priorityClass.getEnumConstants()) {
                 if (constant instanceof Enum<?> enumConstant && enumConstant.name().equals("NORMAL")) {
                     normalPriority = constant;
                     break;
                 }
             }
-
             if (normalPriority == null) {
-                throw new IllegalStateException("No se encontró Priority.NORMAL de Cobblemon.");
+                throw new IllegalStateException("Cobblemon Priority.NORMAL no disponible");
             }
 
-            Class<?> handlerType = subscribeMethod.getParameterTypes()[1];
-
+            Class<?> handlerType = subscribe.getParameterTypes()[1];
             Object handler = Proxy.newProxyInstance(
                     handlerType.getClassLoader(),
                     new Class<?>[]{handlerType},
                     (proxy, method, args) -> {
                         if (method.getName().equals("invoke") && args != null && args.length == 1) {
-                            handleBattleFainted(args[0]);
+                            try {
+                                callback.accept(args[0]);
+                            } catch (Exception exception) {
+                                exception.printStackTrace();
+                            }
                             return kotlinUnit();
                         }
 
                         if (method.getName().equals("toString")) {
-                            return "CraftersMobManagerSpawnBattleFaintedHandler";
+                            return "CraftersMobManagerSpawn-" + eventField;
                         }
-
                         if (method.getName().equals("hashCode")) {
                             return System.identityHashCode(proxy);
                         }
-
                         if (method.getName().equals("equals")) {
                             return args != null && args.length == 1 && proxy == args[0];
                         }
-
                         return null;
                     }
             );
 
-            subscribeMethod.invoke(battleFaintedObservable, normalPriority, handler);
-            battleFaintedListenerRegistered = true;
-
+            subscribe.invoke(observable, normalPriority, handler);
+            return true;
         } catch (Throwable throwable) {
-            /*
-             * Cobblemon es una compatibilidad opcional. Un cambio de API no debe impedir
-             * que CraftersMobManagerSpawn inicie sin Cobblemon.
-             */
+            System.err.println("[MMSpawn] No se pudo registrar " + eventField + " de Cobblemon");
             throwable.printStackTrace();
+            return false;
         }
     }
 
-    /**
-     * BATTLE_FAINTED entrega un BattlePokemon. Obtenemos el Pokemon afectado y su
-     * PokemonEntity todavía presente en el mundo; esa entidad conserva las tags
-     * mmspawn_managed, mmspawn_zone_* y mmspawn_entry_*.
-     */
-    private static void handleBattleFainted(Object event) {
-        try {
-            Object killedBattlePokemon = invokeNoArgs(event, "getKilled");
-
-            if (killedBattlePokemon == null) {
-                return;
-            }
-
-            Object pokemon = invokeNoArgs(killedBattlePokemon, "getEffectedPokemon");
-
-            if (pokemon == null) {
-                return;
-            }
-
-            Object pokemonEntity = invokeNoArgs(pokemon, "getEntity");
-
-            if (pokemonEntity instanceof Entity entity) {
-                MMSpawnManager.dropConfiguredRewards(entity);
-            }
-
-        } catch (Throwable throwable) {
-            throwable.printStackTrace();
+    private static void handleBattleFainted(Object event) throws Exception {
+        Object killed = invokeNoArgs(event, "getKilled");
+        Object battle = invokeNoArgs(event, "getBattle");
+        if (killed == null || battle == null) {
+            return;
         }
+
+        Object actor = invokeNoArgs(killed, "getActor");
+        UUID defeatedActorId = actor == null ? null : uuidOf(actor);
+
+        Object pokemonEntity = invokeNoArgs(killed, "getEntity");
+        Object pokemon = invokeNoArgs(killed, "getEffectedPokemon");
+        if (!(pokemonEntity instanceof Entity) && pokemon != null) {
+            pokemonEntity = invokeNoArgs(pokemon, "getEntity");
+        }
+
+        // Sólo interesan los Pokémon del mundo etiquetados por este SpawnManager.
+        if (!(pokemonEntity instanceof Entity entity)) {
+            return;
+        }
+
+        Component pokemonName = Component.literal("Pokémon");
+        if (pokemon != null) {
+            Object displayName = invokeNoArgs(pokemon, "getDisplayName");
+            if (displayName instanceof Component component) {
+                pokemonName = component;
+            }
+        }
+
+        // La causa del faint identifica al Pokémon que dio el golpe final,
+        // incluso en batallas cooperativas, veneno u otros efectos persistentes.
+        UUID attackerPlayerId = null;
+        Object context = invokeNoArgs(event, "getContext");
+        if (context != null) {
+            Object origin = invokeNoArgs(context, "getOrigin");
+            if (origin != null) {
+                Object originActor = invokeNoArgs(origin, "getActor");
+                if (originActor != null && "PLAYER".equals(String.valueOf(invokeNoArgs(originActor, "getType")))) {
+                    attackerPlayerId = uuidOf(originActor);
+                }
+            }
+        }
+
+        MMSpawnManager.queuePokemonBattleReward(
+                (UUID) invokeNoArgs(battle, "getBattleId"),
+                entity,
+                defeatedActorId,
+                attackerPlayerId,
+                pokemonName
+        );
+    }
+
+    private static void handleBattleVictory(Object event) throws Exception {
+        Object battle = invokeNoArgs(event, "getBattle");
+        if (battle == null) {
+            return;
+        }
+
+        Object winnersObject = invokeNoArgs(event, "getWinners");
+        Object losersObject = invokeNoArgs(event, "getLosers");
+        Object captureObject = invokeNoArgs(event, "getWasWildCapture");
+
+        List<UUID> winnerPlayerIds = new ArrayList<>();
+        Set<UUID> losingActorIds = new HashSet<>();
+
+        if (winnersObject instanceof Iterable<?> winners) {
+            for (Object winner : winners) {
+                if ("PLAYER".equals(String.valueOf(invokeNoArgs(winner, "getType")))) {
+                    UUID uuid = uuidOf(winner);
+                    if (uuid != null) {
+                        winnerPlayerIds.add(uuid);
+                    }
+                }
+            }
+        }
+
+        if (losersObject instanceof Iterable<?> losers) {
+            for (Object loser : losers) {
+                UUID uuid = uuidOf(loser);
+                if (uuid != null) {
+                    losingActorIds.add(uuid);
+                }
+            }
+        }
+
+        UUID battleId = (UUID) invokeNoArgs(battle, "getBattleId");
+        MMSpawnManager.completePokemonBattleRewards(
+                battleId,
+                winnerPlayerIds,
+                losingActorIds,
+                Boolean.TRUE.equals(captureObject)
+        );
+    }
+
+    private static UUID uuidOf(Object battleActor) throws Exception {
+        Object value = invokeNoArgs(battleActor, "getUuid");
+        return value instanceof UUID uuid ? uuid : null;
     }
 
     private static Object invokeNoArgs(Object target, String methodName) throws Exception {
