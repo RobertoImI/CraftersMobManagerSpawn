@@ -389,10 +389,7 @@ public class CobblemonCompat {
         }
 
         Component pokemonName = Component.literal("Pokémon");
-        Object displayName = invokeNoArgs(pokemon, "getDisplayName");
-        if (displayName instanceof Component component) {
-            pokemonName = component;
-        }
+        pokemonName = pokemonDisplayName(pokemon);
 
         UUID attackerPlayerId = null;
         Object context = invokeNoArgs(event, "getContext");
@@ -472,10 +469,7 @@ public class CobblemonCompat {
                     Object original = invokeNoArgs(battlePokemon, "getOriginalPokemon");
                     Component name = Component.literal("Pokémon");
                     if (effected != null) {
-                        Object nameObject = invokeNoArgs(effected, "getDisplayName");
-                        if (nameObject instanceof Component component) {
-                            name = component;
-                        }
+                        name = pokemonDisplayName(effected);
                     }
 
                     for (Object candidate : new Object[]{original, effected}) {
@@ -505,6 +499,27 @@ public class CobblemonCompat {
         MMSpawnManager.completePokemonBattleRewards(
                 battleId, winnerPlayerIds, losingActorIds, capture
         );
+    }
+
+    /**
+     * En Cobblemon 1.7.x Pokemon.getDisplayName(boolean showTitle) tiene
+     * parámetro Kotlin por defecto, pero no ofrece sobrecarga Java sin args.
+     * No debemos lanzar NoSuchMethodException durante el evento de batalla.
+     */
+    private static Component pokemonDisplayName(Object pokemon) {
+        if (pokemon == null) {
+            return Component.literal("Pokémon");
+        }
+        try {
+            Method getter = pokemon.getClass().getMethod("getDisplayName", boolean.class);
+            Object name = getter.invoke(pokemon, false);
+            if (name instanceof Component component) {
+                return component.copy();
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // Un nombre ausente no debe cancelar una recompensa válida.
+        }
+        return Component.literal("Pokémon");
     }
 
     private static UUID uuidOf(Object battleActor) throws Exception {
