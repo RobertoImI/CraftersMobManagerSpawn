@@ -73,6 +73,9 @@ public class MMSpawnCommands {
                 .then(Commands.literal("list")
                         .executes(context -> list(context.getSource())))
 
+                .then(Commands.literal("debug")
+                        .executes(context -> debug(context.getSource())))
+
                 .then(Commands.literal("info")
                         .then(Commands.argument("id", StringArgumentType.word())
                                 .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
@@ -470,6 +473,20 @@ public class MMSpawnCommands {
         }
 
         success(source, "Zonas: " + String.join(", ", MMSpawnManager.getZoneIds()));
+        return 1;
+    }
+
+    /**
+     * Diagnóstico server-side: comprueba listeners y asociación de Pokémon.
+     * No afecta a recompensas ni datos guardados.
+     */
+    private static int debug(CommandSourceStack source) {
+        success(source, "MMSpawn diagnóstico de recompensas:");
+        success(source, "Cobblemon instalado: " + CobblemonCompat.isCobblemonLoaded());
+        success(source, "Listener BATTLE_FAINTED: " + CobblemonCompat.isBattleFaintedListenerRegistered());
+        success(source, "Listener BATTLE_VICTORY: " + CobblemonCompat.isBattleVictoryListenerRegistered());
+        success(source, "Pokémon administrados identificados: " + MMSpawnManager.getTrackedPokemonCount());
+        success(source, "Recompensas de batalla pendientes: " + MMSpawnManager.getPendingPokemonRewardCount());
         return 1;
     }
 
