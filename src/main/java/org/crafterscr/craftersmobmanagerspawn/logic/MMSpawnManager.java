@@ -1,12 +1,15 @@
 package org.crafterscr.craftersmobmanagerspawn.logic;
 
+import net.minecraft.ChatFormatting;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.particles.ParticleTypes;
 import net.minecraft.core.registries.BuiltInRegistries;
+import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.Mob;
@@ -22,6 +25,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn;
 import org.crafterscr.craftersmobmanagerspawn.compat.CobblemonCompat;
 import org.crafterscr.craftersmobmanagerspawn.data.MMSpawnStorage;
 import org.crafterscr.craftersmobmanagerspawn.data.SpawnDropEntry;
@@ -89,6 +93,10 @@ public class MMSpawnManager {
     private static final Map<UUID, Long> PROCESSED_DROP_UUIDS = new LinkedHashMap<>();
     private static final long PROCESSED_DROP_TTL_MILLIS = 10L * 60L * 1000L;
 
+    // El faint anota una recompensa potencial; únicamente BATTLE_VICTORY puede entregarla.
+    private static final Map<UUID, List<PendingPokemonBattleReward>> PENDING_BATTLE_REWARDS = new LinkedHashMap<>();
+    private static final long BATTLE_REWARD_TTL_MILLIS = 30L * 60L * 1000L;
+
     // Referencia al servidor actual. Se usa para guardar el JSON desde otros métodos.
     private static MinecraftServer currentServer;
 
@@ -108,6 +116,7 @@ public class MMSpawnManager {
         VISUAL_TASKS.clear();
         PENDING_COBBLEMON_SPAWNS.clear();
         PROCESSED_DROP_UUIDS.clear();
+        PENDING_BATTLE_REWARDS.clear();
 
         // Se registra aquí, con el servidor ya iniciado, para mantener Cobblemon opcional.
         CobblemonCompat.registerBattleFaintedListener();
@@ -128,6 +137,7 @@ public class MMSpawnManager {
         VISUAL_TASKS.clear();
         PENDING_COBBLEMON_SPAWNS.clear();
         PROCESSED_DROP_UUIDS.clear();
+        PENDING_BATTLE_REWARDS.clear();
     }
 
     /**
@@ -151,6 +161,7 @@ public class MMSpawnManager {
         // Primero resolvemos Pokémon pendientes para que cuenten antes de spawnear más.
         tickPendingCobblemonSpawns(server);
         cleanupProcessedDropUuids();
+        cleanupExpiredBattleRewards();
 
         for (SpawnZone zone : ZONES.values()) {
             tickZone(server, zone);
@@ -955,6 +966,165 @@ public class MMSpawnManager {
                 remaining -= amount;
             }
         }
+    }
+
+    /**
+     * Registra un KO en el combate, sin entregar todavía premios. Puede llamarse
+     * cuando el Pokémon hace faint, incluso si el equipo todavía puede pelear.
+     */
+    public static void queuePokemonBattleReward(
+            UUID battleId,
+            Entity defeatedEntity,
+            UUID defeatedActorId,
+            UUID finalAttackerPlayerId,
+            Component pokemonName
+    ) {
+        if (battleId == null || defeatedEntity == null
+                || !(defeatedEntity.level() instanceof ServerLevel)
+                || !defeatedEntity.getTags().contains(MANAGED_TAG)) {
+            return;
+        }
+
+        SpawnZone zone = null;
+        for (SpawnZone candidate : ZONES.values()) {
+            if (defeatedEntity.getTags().contains(getZoneTag(candidate))) {
+                zone = candidate;
+                break;
+            }
+        }
+
+        if (zone == null || PROCESSED_DROP_UUIDS.containsKey(defeatedEntity.getUUID())) {
+            return;
+        }
+
+        SpawnMobEntry entry = findEntryForTaggedEntity(zone, defeatedEntity);
+        if (entry == null || !CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
+            return;
+        }
+
+        List<PendingPokemonBattleReward> pending =
+                PENDING_BATTLE_REWARDS.computeIfAbsent(battleId, ignored -> new ArrayList<>());
+
+        for (PendingPokemonBattleReward previous : pending) {
+            if (previous.entityId().equals(defeatedEntity.getUUID())) {
+                return;
+            }
+        }
+
+        List<SpawnDropEntry> snapshot = new ArrayList<>();
+        for (SpawnDropEntry drop : entry.getDrops()) {
+            if (drop.getItemId() != null) {
+                snapshot.add(new SpawnDropEntry(drop.getItemId(), drop.getCount()));
+            }
+        }
+
+        pending.add(new PendingPokemonBattleReward(
+                defeatedEntity.getUUID(),
+                defeatedActorId,
+                finalAttackerPlayerId,
+                pokemonName == null ? Component.literal("Pokémon") : pokemonName.copy(),
+                snapshot,
+                System.currentTimeMillis()
+        ));
+    }
+
+    /**
+     * Única ruta que entrega premios de Pokémon: una victoria confirmada de Cobblemon.
+     * No paga en capturas, huidas, derrotas del jugador ni limpiezas administrativas.
+     */
+    public static void completePokemonBattleRewards(
+            UUID battleId,
+            List<UUID> winnerPlayerIds,
+            Set<UUID> losingActorIds,
+            boolean wasWildCapture
+    ) {
+        List<PendingPokemonBattleReward> rewards = PENDING_BATTLE_REWARDS.remove(battleId);
+        if (rewards == null || rewards.isEmpty() || wasWildCapture
+                || winnerPlayerIds == null || winnerPlayerIds.isEmpty() || currentServer == null) {
+            return;
+        }
+
+        for (PendingPokemonBattleReward reward : rewards) {
+            if (reward.defeatedActorId() == null
+                    || losingActorIds == null
+                    || !losingActorIds.contains(reward.defeatedActorId())) {
+                continue;
+            }
+
+            // Preferimos el Pokémon que ejecutó el KO; de no ser posible, el vencedor.
+            UUID playerId = reward.finalAttackerPlayerId();
+            if (playerId == null || !winnerPlayerIds.contains(playerId)) {
+                playerId = winnerPlayerIds.get(0);
+            }
+
+            ServerPlayer player = currentServer.getPlayerList().getPlayer(playerId);
+            if (player == null) {
+                CraftersMobManagerSpawn.LOGGER.warn(
+                        "No se pudieron entregar premios al ganador desconectado {} para el Pokémon {}",
+                        playerId, reward.pokemonName().getString()
+                );
+                continue;
+            }
+
+            if (PROCESSED_DROP_UUIDS.putIfAbsent(reward.entityId(), System.currentTimeMillis()) != null) {
+                continue;
+            }
+
+            for (SpawnDropEntry drop : reward.drops()) {
+                ResourceLocation itemId;
+                try {
+                    itemId = ResourceLocation.parse(drop.getItemId());
+                } catch (Exception ignored) {
+                    continue;
+                }
+
+                Optional<Item> optionalItem = BuiltInRegistries.ITEM.getOptional(itemId);
+                if (optionalItem.isEmpty() || optionalItem.get() == net.minecraft.world.item.Items.AIR) {
+                    continue;
+                }
+
+                Item item = optionalItem.get();
+                int remaining = Math.max(1, drop.getCount());
+                while (remaining > 0) {
+                    ItemStack stack = new ItemStack(item, 1);
+                    int amount = Math.min(remaining, stack.getMaxStackSize());
+                    stack.setCount(amount);
+
+                    // Inventory.add modifica el stack recibido con la cantidad sobrante.
+                    player.getInventory().add(stack);
+                    if (!stack.isEmpty()) {
+                        // Si no hay espacios, no perdemos el premio: queda junto al ganador.
+                        player.drop(stack.copy(), false);
+                    }
+                    remaining -= amount;
+                }
+            }
+
+            player.getInventory().setChanged();
+
+            Component announcement = Component.literal(player.getGameProfile().getName() + " derrotó a ")
+                    .append(reward.pokemonName().copy())
+                    .withStyle(ChatFormatting.YELLOW);
+            currentServer.getPlayerList().broadcastSystemMessage(announcement, false);
+        }
+    }
+
+    private static void cleanupExpiredBattleRewards() {
+        long cutoff = System.currentTimeMillis() - BATTLE_REWARD_TTL_MILLIS;
+        PENDING_BATTLE_REWARDS.entrySet().removeIf(entry -> {
+            entry.getValue().removeIf(reward -> reward.createdAt() < cutoff);
+            return entry.getValue().isEmpty();
+        });
+    }
+
+    private record PendingPokemonBattleReward(
+            UUID entityId,
+            UUID defeatedActorId,
+            UUID finalAttackerPlayerId,
+            Component pokemonName,
+            List<SpawnDropEntry> drops,
+            long createdAt
+    ) {
     }
 
     private static SpawnMobEntry findEntryForTaggedEntity(SpawnZone zone, Entity entity) {
