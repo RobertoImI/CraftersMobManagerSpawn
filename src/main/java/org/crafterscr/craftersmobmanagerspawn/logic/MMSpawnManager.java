@@ -1214,11 +1214,36 @@ public class MMSpawnManager {
                     int amount = Math.min(remaining, stack.getMaxStackSize());
                     stack.setCount(amount);
 
-                    // Inventory.add modifica el stack recibido con la cantidad sobrante.
-                    player.getInventory().add(stack);
+                    // La inserción consume sólo la cantidad que realmente cabe.
+                    // Si no existe ningún hueco ni una pila compatible, no llamar a
+                    // Inventory.add: en creativo podría consumir el stack sin guardarlo.
+                    boolean canFit = player.getInventory().getFreeSlot() >= 0
+                            || player.getInventory().getSlotWithRemainingSpace(stack) >= 0;
+                    if (canFit) {
+                        player.getInventory().add(stack);
+                    }
+
+                    // Los sobrantes se crean como ItemEntity de servidor, no con
+                    // Player.drop (que puede estar cancelado por otros mods).
+                    // setTarget establece el propietario de recogida en 1.21.1:
+                    // sólo el vencedor puede recoger estos objetos.
                     if (!stack.isEmpty()) {
-                        // Si no hay espacios, no perdemos el premio: queda junto al ganador.
-                        player.drop(stack.copy(), false);
+                        ItemEntity overflow = new ItemEntity(
+                                player.serverLevel(),
+                                player.getX(),
+                                player.getY() + 0.25D,
+                                player.getZ(),
+                                stack.copy()
+                        );
+                        overflow.setTarget(player.getUUID());
+                        overflow.setDefaultPickUpDelay();
+                        if (!player.serverLevel().addFreshEntity(overflow)) {
+                            CraftersMobManagerSpawn.LOGGER.error(
+                                    "MMSpawn: no se pudo generar un premio sobrante para {}: {}x {}",
+                                    player.getGameProfile().getName(),
+                                    stack.getCount(), drop.getItemId()
+                            );
+                        }
                     }
                     remaining -= amount;
                 }
