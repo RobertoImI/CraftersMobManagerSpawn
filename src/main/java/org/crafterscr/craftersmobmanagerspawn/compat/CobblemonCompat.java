@@ -44,6 +44,14 @@ public class CobblemonCompat {
     private CobblemonCompat() {
     }
 
+    public static boolean isBattleFaintedListenerRegistered() {
+        return battleFaintedListenerRegistered;
+    }
+
+    public static boolean isBattleVictoryListenerRegistered() {
+        return battleVictoryListenerRegistered;
+    }
+
     /**
      * Revisa si Cobblemon está cargado.
      */
