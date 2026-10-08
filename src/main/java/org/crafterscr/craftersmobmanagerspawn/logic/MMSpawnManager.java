@@ -370,6 +370,22 @@ public class MMSpawnManager {
     }
 
     /**
+     * Ejecuta callbacks de Cobblemon en el hilo principal del servidor.
+     * Evita manipular inventarios o tablas de premios desde otros hilos.
+     */
+    public static void executeOnServerThread(Runnable action) {
+        MinecraftServer server = currentServer;
+        if (server == null) {
+            return;
+        }
+        if (server.isSameThread()) {
+            action.run();
+        } else {
+            server.execute(action);
+        }
+    }
+
+    /**
      * Guarda manualmente todas las zonas en el JSON.
      */
     public static void save() {
@@ -1103,8 +1119,8 @@ public class MMSpawnManager {
             player.getInventory().setChanged();
 
             Component announcement = Component.literal(player.getGameProfile().getName() + " derrotó a ")
-                    .append(reward.pokemonName().copy())
-                    .withStyle(ChatFormatting.YELLOW);
+                    .withStyle(ChatFormatting.YELLOW)
+                    .append(reward.pokemonName().copy().withStyle(ChatFormatting.YELLOW));
             currentServer.getPlayerList().broadcastSystemMessage(announcement, false);
         }
     }
