@@ -350,6 +350,22 @@ public class CobblemonCompat {
         }
     }
 
+    /**
+     * UUID persistente del objeto Pokemon, diferente del UUID de PokemonEntity.
+     */
+    public static UUID getPokemonUuidFromEntity(Entity entity) {
+        if (entity == null) {
+            return null;
+        }
+        try {
+            Object pokemon = invokeNoArgs(entity, "getPokemon");
+            Object uuid = invokeNoArgs(pokemon, "getUuid");
+            return uuid instanceof UUID found ? found : null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private static void handleBattleFainted(Object event) throws Exception {
         Object killed = invokeNoArgs(event, "getKilled");
         Object battle = invokeNoArgs(event, "getBattle");
@@ -359,28 +375,23 @@ public class CobblemonCompat {
 
         Object actor = invokeNoArgs(killed, "getActor");
         UUID defeatedActorId = actor == null ? null : uuidOf(actor);
-
-        Object pokemonEntity = invokeNoArgs(killed, "getEntity");
         Object pokemon = invokeNoArgs(killed, "getEffectedPokemon");
-        if (!(pokemonEntity instanceof Entity) && pokemon != null) {
-            pokemonEntity = invokeNoArgs(pokemon, "getEntity");
+        if (pokemon == null) {
+            return;
         }
 
-        // Sólo interesan los Pokémon del mundo etiquetados por este SpawnManager.
-        if (!(pokemonEntity instanceof Entity entity)) {
+        Object pokemonUuidObject = invokeNoArgs(pokemon, "getUuid");
+        UUID pokemonUuid = pokemonUuidObject instanceof UUID uuid ? uuid : null;
+        if (pokemonUuid == null) {
             return;
         }
 
         Component pokemonName = Component.literal("Pokémon");
-        if (pokemon != null) {
-            Object displayName = invokeNoArgs(pokemon, "getDisplayName");
-            if (displayName instanceof Component component) {
-                pokemonName = component;
-            }
+        Object displayName = invokeNoArgs(pokemon, "getDisplayName");
+        if (displayName instanceof Component component) {
+            pokemonName = component;
         }
 
-        // La causa del faint identifica al Pokémon que dio el golpe final,
-        // incluso en batallas cooperativas, veneno u otros efectos persistentes.
         UUID attackerPlayerId = null;
         Object context = invokeNoArgs(event, "getContext");
         if (context != null) {
@@ -393,12 +404,9 @@ public class CobblemonCompat {
             }
         }
 
-        MMSpawnManager.queuePokemonBattleReward(
+        MMSpawnManager.queuePokemonBattleRewardByPokemonUuid(
                 (UUID) invokeNoArgs(battle, "getBattleId"),
-                entity,
-                defeatedActorId,
-                attackerPlayerId,
-                pokemonName
+                pokemonUuid, defeatedActorId, attackerPlayerId, pokemonName
         );
     }
 
