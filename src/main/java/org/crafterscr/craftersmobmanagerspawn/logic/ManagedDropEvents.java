@@ -1,5 +1,6 @@
 package org.crafterscr.craftersmobmanagerspawn.logic;
 
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.neoforged.bus.api.EventPriority;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.entity.living.LivingDeathEvent;
@@ -17,7 +18,14 @@ public class ManagedDropEvents {
 
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onLivingDeath(LivingDeathEvent event) {
-        if (!event.isCanceled()) {
+        if (event.isCanceled()) {
+            return;
+        }
+
+        // Los Pokémon sólo se premian después de BATTLE_VICTORY, nunca aquí.
+        // Así una derrota en combate no crea ítems sin dueño en el suelo.
+        String typeId = BuiltInRegistries.ENTITY_TYPE.getKey(event.getEntity().getType()).toString();
+        if (!"cobblemon:pokemon".equals(typeId)) {
             MMSpawnManager.dropConfiguredRewards(event.getEntity());
         }
     }
