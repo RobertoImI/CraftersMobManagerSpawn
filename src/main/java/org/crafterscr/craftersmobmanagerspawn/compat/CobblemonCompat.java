@@ -6,7 +6,6 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
-import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.AABB;
@@ -19,8 +18,6 @@ import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
-import java.util.HashMap;
 import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
@@ -320,11 +317,14 @@ public class CobblemonCompat {
                     new Class<?>[]{handlerType},
                     (proxy, method, args) -> {
                         if (method.getName().equals("invoke") && args != null && args.length == 1) {
-                            try {
-                                callback.accept(args[0]);
-                            } catch (Exception exception) {
-                                exception.printStackTrace();
-                            }
+                            Object cobblemonEvent = args[0];
+                            MMSpawnManager.executeOnServerThread(() -> {
+                                try {
+                                    callback.accept(cobblemonEvent);
+                                } catch (Exception exception) {
+                                    exception.printStackTrace();
+                                }
+                            });
                             return kotlinUnit();
                         }
 
