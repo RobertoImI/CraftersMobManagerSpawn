@@ -1235,7 +1235,13 @@ public class MMSpawnManager {
                         // Da tiempo a que la entidad aparezca y evita su recogida
                         // inmediata al generarse sobre el jugador.
                         overflow.setPickUpDelay(40);
-                        if (!player.serverLevel().addFreshEntity(overflow)) {
+                        if (player.serverLevel().addFreshEntity(overflow)) {
+                            CraftersMobManagerSpawn.LOGGER.info(
+                                    "MMSpawn: premio en suelo para {}: {}x {} (entidad={}, público)",
+                                    player.getGameProfile().getName(),
+                                    stack.getCount(), drop.getItemId(), overflow.getUUID()
+                            );
+                        } else {
                             CraftersMobManagerSpawn.LOGGER.error(
                                     "MMSpawn: no se pudo generar un premio sobrante para {}: {}x {}",
                                     player.getGameProfile().getName(),
