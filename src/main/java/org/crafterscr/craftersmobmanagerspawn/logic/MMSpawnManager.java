@@ -25,6 +25,7 @@ import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.server.ServerStartedEvent;
 import net.neoforged.neoforge.event.server.ServerStoppingEvent;
 import net.neoforged.neoforge.event.tick.ServerTickEvent;
+import net.neoforged.neoforge.event.tick.EntityTickEvent;
 import org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn;
 import org.crafterscr.craftersmobmanagerspawn.compat.CobblemonCompat;
 import org.crafterscr.craftersmobmanagerspawn.data.MMSpawnStorage;
@@ -1006,7 +1007,7 @@ public class MMSpawnManager {
 
         // La marca viaja con el objeto Pokémon de Cobblemon a través de batallas
         // y sus recreaciones de entidad, sin depender de coordenadas.
-        CobblemonCompat.markManagedPokemonZone(entity, zone.getId());
+        CobblemonCompat.markManagedPokemonZone(entity, zone.getId(), zone.isCaptureDenied());
 
         SpawnMobEntry entry = findEntryForTaggedEntity(zone, entity);
         if (entry == null || !CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
@@ -1024,6 +1025,57 @@ public class MMSpawnManager {
                         zone.getId(), entry.getEntityId(), pokemonUuid
                 );
             }
+        }
+    }
+
+    /**
+     * Actualiza en el acto a los Pokémon cargados de la zona cuando el admin
+     * usa 'pokemon capture deny/allow'; no recrea entidades ni cambia drops.
+     */
+    public static void refreshZoneCaptureProtection(MinecraftServer server, SpawnZone zone) {
+        ServerLevel level = getLevel(server, zone);
+        if (level == null) {
+            return;
+        }
+        for (Entity entity : getTaggedMobsInZone(level, zone)) {
+            CobblemonCompat.markManagedPokemonZone(entity, zone.getId(), zone.isCaptureDenied());
+        }
+        for (UUID id : zone.getActiveMobUuids()) {
+            Entity entity = level.getEntity(id);
+            if (entity != null && entity.getTags().contains(MANAGED_TAG)) {
+                CobblemonCompat.markManagedPokemonZone(entity, zone.getId(), zone.isCaptureDenied());
+            }
+        }
+    }
+
+    /**
+     * Mantiene el indicador nativo de Cobblemon actualizado también si el
+     * Pokémon sale del radio original, cambia de entidad o se descarga/carga.
+     * Se ejecuta sólo una vez por segundo por Pokémon, siempre en servidor.
+     */
+    @SubscribeEvent
+    public static void onPokemonEntityTick(EntityTickEvent.Post event) {
+        Entity entity = event.getEntity();
+        if (entity.level().isClientSide || entity.tickCount % 20 != 0
+                || !"cobblemon:pokemon".equals(
+                    BuiltInRegistries.ENTITY_TYPE.getKey(entity.getType()).toString())) {
+            return;
+        }
+
+        if (entity.getTags().contains(MANAGED_TAG)) {
+            for (SpawnZone zone : ZONES.values()) {
+                if (entity.getTags().contains(getZoneTag(zone))) {
+                    CobblemonCompat.markManagedPokemonZone(entity, zone.getId(), zone.isCaptureDenied());
+                    return;
+                }
+            }
+        }
+
+        String zoneId = CobblemonCompat.getManagedZoneIdFromEntity(entity);
+        if (zoneId != null) {
+            SpawnZone zone = getZone(zoneId);
+            CobblemonCompat.synchronizeNativeCaptureProperty(entity,
+                    zone != null && zone.isCaptureDenied());
         }
     }
 
