@@ -726,7 +726,7 @@ public class CobblemonCompat {
         return value instanceof UUID uuid ? uuid : null;
     }
 
-    private static Object invokeNoArgs(Object target, String methodName) throws Exception {
+    private static Object invokeNoArgs(Object target, String methodName) throws ReflectiveOperationException {
         Method method = target.getClass().getMethod(methodName);
         return method.invoke(target);
     }
