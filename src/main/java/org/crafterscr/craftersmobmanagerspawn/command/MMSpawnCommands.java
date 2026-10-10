@@ -495,6 +495,8 @@ public class MMSpawnCommands {
         success(source, "Cobblemon instalado: " + CobblemonCompat.isCobblemonLoaded());
         success(source, "Listener BATTLE_FAINTED: " + CobblemonCompat.isBattleFaintedListenerRegistered());
         success(source, "Listener BATTLE_VICTORY: " + CobblemonCompat.isBattleVictoryListenerRegistered());
+        success(source, "Protección THROWN_POKEBALL_HIT: " + CobblemonCompat.isCaptureHitListenerRegistered());
+        success(source, "Protección POKE_BALL_CAPTURE_CALCULATED: " + CobblemonCompat.isCaptureCalculatedListenerRegistered());
         success(source, "Pokémon administrados identificados: " + MMSpawnManager.getTrackedPokemonCount());
         success(source, "Recompensas de batalla pendientes: " + MMSpawnManager.getPendingPokemonRewardCount());
         return 1;
