@@ -87,12 +87,6 @@ public class CobblemonCompat {
             if (data instanceof CompoundTag tag) {
                 if (!zoneId.equals(tag.getString(MANAGED_ZONE_DATA_KEY))) {
                     tag.putString(MANAGED_ZONE_DATA_KEY, zoneId);
-                    // En una zona 'deny', el spawn ya aplica uncatchable=yes.
-                    // Registrar que esa protección pertenece a MMSpawn permite
-                    // revertirla al ejecutar 'capture allow' posteriormente.
-                    if (denyCapture && Boolean.TRUE.equals(invokeNoArgs(pokemon, "isUncatchable"))) {
-                        tag.putBoolean(NATIVE_UNCATCHABLE_OWNED_KEY, true);
-                    }
                 }
                 synchronizeNativeCaptureProperty(pokemon, tag, denyCapture);
             }
@@ -129,52 +123,31 @@ public class CobblemonCompat {
 
     private static void synchronizeNativeCaptureProperty(Object pokemon, CompoundTag tag, boolean denied)
             throws ReflectiveOperationException {
-        // getCustomProperties() contiene la lista real utilizada por
-        // UncatchableProperty.isCatchable(PokemonEntity), antes de procesar bolas.
-        // Evitamos la invocación reflectiva de FlagProperty.apply, que podía
-        // fallar sin dejar el flag configurado.
-        Object custom = invokeNoArgs(pokemon, "getCustomProperties");
-        if (!(custom instanceof List<?> rawProperties)) {
-            throw new ReflectiveOperationException("Cobblemon Pokemon.getCustomProperties() no devolvió List");
-        }
-        @SuppressWarnings("unchecked")
-        List<Object> properties = (List<Object>) rawProperties;
-        boolean flagged = hasUncatchableProperty(properties);
         boolean appliedByUs = tag.getBoolean(NATIVE_UNCATCHABLE_OWNED_KEY);
+        Object nativeFlag = invokeNoArgs(pokemon, "isUncatchable");
+        boolean alreadyUncatchable = Boolean.TRUE.equals(nativeFlag);
 
-        if (denied && !flagged) {
-            Class<?> flagType = Class.forName(
-                    "com.cobblemon.mod.common.pokemon.properties.FlagProperty");
-            Object flag = flagType.getConstructor(String.class, boolean.class)
-                    .newInstance("uncatchable", false);
-            properties.add(flag);
+        if (denied && !alreadyUncatchable) {
+            updateNativeUncatchableFlag(pokemon, false);
             tag.putBoolean(NATIVE_UNCATCHABLE_OWNED_KEY, true);
         } else if (!denied && appliedByUs) {
-            properties.removeIf(CobblemonCompat::isUncatchableFlag);
+            updateNativeUncatchableFlag(pokemon, true);
             tag.remove(NATIVE_UNCATCHABLE_OWNED_KEY);
         }
-
-        boolean after = Boolean.TRUE.equals(invokeNoArgs(pokemon, "isUncatchable"));
-        if (after != denied && !(after && !denied && !appliedByUs)) {
-            org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.error(
-                    "MMSpawn: protección de captura NO aplicada correctamente (deny={}, nativeUncatchable={})",
-                    denied, after);
-        }
     }
 
-    private static boolean hasUncatchableProperty(List<?> properties) {
-        return properties.stream().anyMatch(CobblemonCompat::isUncatchableFlag);
-    }
-
-    private static boolean isUncatchableFlag(Object item) {
-        if (item == null || !item.getClass().getName().endsWith(".FlagProperty")) {
-            return false;
-        }
-        try {
-            return "uncatchable".equalsIgnoreCase(String.valueOf(invokeNoArgs(item, "getKey")));
-        } catch (ReflectiveOperationException ignored) {
-            return false;
-        }
+    /**
+     * 'uncatchable' es propiedad interna de Cobblemon 1.7. Sólo reflexión:
+     * CraftersMobManagerSpawn continúa siendo server-side y dependencia opcional.
+     */
+    private static void updateNativeUncatchableFlag(Object pokemon, boolean remove)
+            throws ReflectiveOperationException {
+        Class<?> nativeType = Class.forName(
+                "com.cobblemon.mod.common.pokemon.properties.UncatchableProperty");
+        Object nativeSingleton = nativeType.getField("INSTANCE").get(null);
+        Object flag = nativeType.getMethod(remove ? "catchable" : "uncatchable").invoke(nativeSingleton);
+        Class<?> pokemonType = Class.forName("com.cobblemon.mod.common.pokemon.Pokemon");
+        flag.getClass().getMethod("apply", pokemonType).invoke(flag, pokemon);
     }
 
     public static String getManagedZoneIdFromEntity(Entity entity) {
@@ -318,7 +291,7 @@ public class CobblemonCompat {
      * No devuelve la entidad directamente porque a veces Cobblemon no deja verla
      * en el mismo tick. Para evitar doble spawn, MMSpawnManager la marcará como pending.
      */
-    public static boolean runPokeSpawnAt(ServerLevel level, BlockPos pos, String entryId, boolean denyCapture) {
+    public static boolean runPokeSpawnAt(ServerLevel level, BlockPos pos, String entryId) {
         if (!isCobblemonLoaded()) {
             return false;
         }
@@ -327,13 +300,6 @@ public class CobblemonCompat {
 
         if (pokemonProperties.isBlank()) {
             return false;
-        }
-
-        // Es una propiedad NATIVA de Cobblemon: bloquea antes de que se cree
-        // BattleCaptureAction y por tanto evita el bloqueo de turnos en batalla.
-        // No modificar las entradas guardadas por el admin.
-        if (denyCapture && !pokemonProperties.matches("(?i).*\\buncatchable(?:=(?:true|yes))?(?:\\s|$).*")) {
-            pokemonProperties += " uncatchable=yes";
         }
 
         Vec3 spawnVec = new Vec3(
