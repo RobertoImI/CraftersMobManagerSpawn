@@ -125,6 +125,7 @@ public class MMSpawnManager {
 
         // Se registra aquí, con el servidor ya iniciado, para mantener Cobblemon opcional.
         CobblemonCompat.registerBattleFaintedListener();
+        CobblemonCompat.registerCaptureProtectionListeners();
     }
 
     /**
@@ -1003,6 +1004,10 @@ public class MMSpawnManager {
             return;
         }
 
+        // La marca viaja con el objeto Pokémon de Cobblemon a través de batallas
+        // y sus recreaciones de entidad, sin depender de coordenadas.
+        CobblemonCompat.markManagedPokemonZone(entity, zone.getId());
+
         SpawnMobEntry entry = findEntryForTaggedEntity(zone, entity);
         if (entry == null || !CobblemonCompat.isCobblemonPokemonEntry(entry.getEntityId())) {
             return;
@@ -1020,6 +1025,44 @@ public class MMSpawnManager {
                 );
             }
         }
+    }
+
+    /**
+     * Consulta inmediata desde eventos cancelables de Cobblemon.
+     * La protección afecta sólo a Pokémon creados y reconocidos por MMSpawn,
+     * no a otros salvajes que compartan especie o estén dentro de la zona.
+     */
+    public static boolean isCaptureDenied(Entity pokemonEntity) {
+        if (pokemonEntity == null
+                || !"cobblemon:pokemon".equals(
+                        BuiltInRegistries.ENTITY_TYPE.getKey(pokemonEntity.getType()).toString())) {
+            return false;
+        }
+
+        // Los tags de entidad cubren los spawns anteriores a este parche.
+        if (pokemonEntity.getTags().contains(MANAGED_TAG)) {
+            for (SpawnZone zone : ZONES.values()) {
+                if (pokemonEntity.getTags().contains(getZoneTag(zone))) {
+                    return zone.isCaptureDenied();
+                }
+            }
+        }
+
+        // La persistencia de Cobblemon mantiene la asignación incluso si
+        // la entidad cambia, entra en combate o se ha alejado de su spawn.
+        String markedZone = CobblemonCompat.getManagedZoneIdFromEntity(pokemonEntity);
+        if (markedZone != null) {
+            SpawnZone zone = getZone(markedZone);
+            return zone != null && zone.isCaptureDenied();
+        }
+
+        UUID pokemonUuid = CobblemonCompat.getPokemonUuidFromEntity(pokemonEntity);
+        TrackedPokemonSpawn tracked = pokemonUuid == null ? null : TRACKED_POKEMON.get(pokemonUuid);
+        if (tracked != null) {
+            SpawnZone zone = getZone(tracked.zoneId());
+            return zone != null && zone.isCaptureDenied();
+        }
+        return false;
     }
 
     public static int getTrackedPokemonCount() {
