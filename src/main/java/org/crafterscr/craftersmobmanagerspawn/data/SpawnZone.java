@@ -77,6 +77,10 @@ public class SpawnZone {
     // Indica si la zona está funcionando o detenida.
     private boolean active = false;
 
+    // Default false para mantener capturables todas las zonas existentes.
+    // Sólo los Pokémon generados por esta zona quedan protegidos.
+    private boolean captureDenied = false;
+
     // Lista de mobs posibles para esta zona, cada uno con su peso.
     private List<SpawnMobEntry> mobs = new ArrayList<>();
 
@@ -236,6 +240,14 @@ public class SpawnZone {
 
     public void setActive(boolean active) {
         this.active = active;
+    }
+
+    public boolean isCaptureDenied() {
+        return captureDenied;
+    }
+
+    public void setCaptureDenied(boolean captureDenied) {
+        this.captureDenied = captureDenied;
     }
 
     public List<SpawnMobEntry> getMobs() {
