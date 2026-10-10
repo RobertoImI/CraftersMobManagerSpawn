@@ -6,6 +6,9 @@ import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.network.chat.Component;
+import net.minecraft.nbt.CompoundTag;
+import net.minecraft.ChatFormatting;
+import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.phys.AABB;
@@ -36,10 +39,13 @@ public class CobblemonCompat {
 
     private static final String COBBLEMON_MOD_ID = "cobblemon";
     private static final String COBBLEMON_POKEMON_ENTITY_ID = "cobblemon:pokemon";
+    private static final String MANAGED_ZONE_DATA_KEY = "crafterscr_mmspawn_zone";
 
     // Se registra una sola vez por proceso. Cobblemon mantiene el listener en su observable global.
     private static boolean battleFaintedListenerRegistered = false;
     private static boolean battleVictoryListenerRegistered = false;
+    private static boolean captureHitListenerRegistered = false;
+    private static boolean captureCalculatedListenerRegistered = false;
 
     private CobblemonCompat() {
     }
@@ -52,11 +58,58 @@ public class CobblemonCompat {
         return battleVictoryListenerRegistered;
     }
 
+    public static boolean isCaptureHitListenerRegistered() {
+        return captureHitListenerRegistered;
+    }
+
+    public static boolean isCaptureCalculatedListenerRegistered() {
+        return captureCalculatedListenerRegistered;
+    }
+
     /**
      * Revisa si Cobblemon está cargado.
      */
     public static boolean isCobblemonLoaded() {
         return ModList.get().isLoaded(COBBLEMON_MOD_ID);
+    }
+
+    /**
+     * Marca únicamente el objeto Pokémon administrado; este dato persiste y
+     * sigue con el Pokémon cuando Cobblemon recrea su entidad para un combate.
+     */
+    public static void markManagedPokemonZone(Entity entity, String zoneId) {
+        if (entity == null || zoneId == null) {
+            return;
+        }
+        try {
+            Object pokemon = invokeNoArgs(entity, "getPokemon");
+            Object data = invokeNoArgs(pokemon, "getPersistentData");
+            if (data instanceof CompoundTag tag && !zoneId.equals(tag.getString(MANAGED_ZONE_DATA_KEY))) {
+                tag.putString(MANAGED_ZONE_DATA_KEY, zoneId);
+            }
+        } catch (ReflectiveOperationException exception) {
+            org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.warn(
+                    "MMSpawn: no se pudo marcar Pokémon de zona {} para protección de captura",
+                    zoneId, exception
+            );
+        }
+    }
+
+    public static String getManagedZoneIdFromEntity(Entity entity) {
+        if (entity == null) {
+            return null;
+        }
+        try {
+            Object pokemon = invokeNoArgs(entity, "getPokemon");
+            Object data = invokeNoArgs(pokemon, "getPersistentData");
+            if (data instanceof CompoundTag tag) {
+                String id = tag.getString(MANAGED_ZONE_DATA_KEY);
+                return id.isBlank() ? null : id;
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // Se recurrirá a las etiquetas persistentes de la entidad o al UUID.
+        }
+        return null;
     }
 
     /**
@@ -277,6 +330,144 @@ public class CobblemonCompat {
 
         if (!battleVictoryListenerRegistered) {
             battleVictoryListenerRegistered = subscribeBattleEvent("BATTLE_VICTORY", CobblemonCompat::handleBattleVictory);
+        }
+    }
+
+    /**
+     * A diferencia de los eventos de victoria, los eventos de captura DEBEN
+     * ejecutarse dentro del callback original: cancelar en el siguiente tick
+     * sería demasiado tarde y permitiría capturas con Master Ball.
+     */
+    public static synchronized void registerCaptureProtectionListeners() {
+        if (!isCobblemonLoaded()) {
+            return;
+        }
+        if (!captureHitListenerRegistered) {
+            captureHitListenerRegistered = subscribeSynchronousCaptureEvent(
+                    "THROWN_POKEBALL_HIT", "HIGHEST", CobblemonCompat::onThrownPokeBallHit
+            );
+        }
+        if (!captureCalculatedListenerRegistered) {
+            captureCalculatedListenerRegistered = subscribeSynchronousCaptureEvent(
+                    "POKE_BALL_CAPTURE_CALCULATED", "LOWEST", CobblemonCompat::onCaptureCalculated
+            );
+        }
+    }
+
+    private static boolean subscribeSynchronousCaptureEvent(
+            String eventField, String priorityName, CobblemonBattleEventHandler callback
+    ) {
+        try {
+            Class<?> eventsClass = Class.forName("com.cobblemon.mod.common.api.events.CobblemonEvents");
+            Object observable = eventsClass.getField(eventField).get(null);
+            Method subscribe = null;
+            for (Method method : observable.getClass().getMethods()) {
+                if (method.getName().equals("subscribe") && method.getParameterCount() == 2
+                        && method.getParameterTypes()[1].getName().equals("kotlin.jvm.functions.Function1")) {
+                    subscribe = method;
+                    break;
+                }
+            }
+            if (subscribe == null) {
+                throw new IllegalStateException("No subscribe(Priority, Function1) for " + eventField);
+            }
+
+            Class<?> priorityClass = Class.forName("com.cobblemon.mod.common.api.Priority");
+            Object priority = null;
+            for (Object option : priorityClass.getEnumConstants()) {
+                if (option instanceof Enum<?> e && e.name().equals(priorityName)) {
+                    priority = option;
+                    break;
+                }
+            }
+            if (priority == null) {
+                throw new IllegalStateException("Unknown Cobblemon priority: " + priorityName);
+            }
+
+            Class<?> handlerType = subscribe.getParameterTypes()[1];
+            Object handler = Proxy.newProxyInstance(
+                    handlerType.getClassLoader(), new Class<?>[]{handlerType},
+                    (proxy, method, args) -> {
+                        if (method.getName().equals("invoke") && args != null && args.length == 1) {
+                            // Deliberadamente síncrono: Cobblemon consulta el resultado
+                            // del evento antes de continuar el cálculo de captura.
+                            try {
+                                callback.accept(args[0]);
+                            } catch (Exception exception) {
+                                org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.error(
+                                        "MMSpawn: error bloqueando captura en " + eventField, exception
+                                );
+                            }
+                            return kotlinUnit();
+                        }
+                        if (method.getName().equals("toString")) {
+                            return "CraftersMobManagerSpawn-" + eventField;
+                        }
+                        if (method.getName().equals("hashCode")) {
+                            return System.identityHashCode(proxy);
+                        }
+                        if (method.getName().equals("equals")) {
+                            return args != null && args.length == 1 && proxy == args[0];
+                        }
+                        return null;
+                    }
+            );
+
+            subscribe.invoke(observable, priority, handler);
+            org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.info(
+                    "MMSpawn: protección de captura {} registrada", eventField
+            );
+            return true;
+        } catch (Throwable exception) {
+            org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.error(
+                    "MMSpawn: no se pudo registrar protección de captura " + eventField, exception
+            );
+            return false;
+        }
+    }
+
+    private static void onThrownPokeBallHit(Object event) throws Exception {
+        Object target = invokeNoArgs(event, "getPokemon");
+        if (target instanceof Entity pokemonEntity && MMSpawnManager.isCaptureDenied(pokemonEntity)) {
+            // CancelableObservable detiene la captura antes de que comience.
+            invokeNoArgs(event, "cancel");
+            sendCaptureDeniedToBallOwner(invokeNoArgs(event, "getPokeBall"));
+        }
+    }
+
+    private static void onCaptureCalculated(Object event) throws Exception {
+        Object target = invokeNoArgs(event, "getPokemonEntity");
+        if (!(target instanceof Entity pokemonEntity) || !MMSpawnManager.isCaptureDenied(pokemonEntity)) {
+            return;
+        }
+
+        // Ruta de respaldo para capturas dentro de batalla y bolas que alcanzan
+        // el cálculo de captura: incluso una Master Ball resulta fallida.
+        Class<?> resultClass = Class.forName(
+                "com.cobblemon.mod.common.api.pokeball.catching.CaptureContext"
+        );
+        Object deniedResult = resultClass.getConstructor(int.class, boolean.class, boolean.class)
+                .newInstance(0, false, false);
+        event.getClass().getMethod("setCaptureResult", resultClass).invoke(event, deniedResult);
+        Object thrower = invokeNoArgs(event, "getThrower");
+        if (thrower instanceof ServerPlayer player) {
+            player.sendSystemMessage(Component.literal("Este Pokémon no se puede capturar.")
+                    .withStyle(ChatFormatting.RED));
+        }
+    }
+
+    private static void sendCaptureDeniedToBallOwner(Object pokeBall) {
+        if (pokeBall == null) {
+            return;
+        }
+        try {
+            Object owner = invokeNoArgs(pokeBall, "getOwner");
+            if (owner instanceof ServerPlayer player) {
+                player.sendSystemMessage(Component.literal("Este Pokémon no se puede capturar.")
+                        .withStyle(ChatFormatting.RED));
+            }
+        } catch (ReflectiveOperationException ignored) {
+            // El bloqueo se mantiene aunque alguna versión no exponga owner.
         }
     }
 
