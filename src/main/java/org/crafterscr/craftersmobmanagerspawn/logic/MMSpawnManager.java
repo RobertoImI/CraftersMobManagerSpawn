@@ -538,7 +538,7 @@ public class MMSpawnManager {
                     COBBLEMON_PENDING_SEARCH_RADIUS
             );
 
-            boolean commandExecuted = CobblemonCompat.runPokeSpawnAt(level, spawnPos, entry.getEntityId(), zone.isCaptureDenied());
+            boolean commandExecuted = CobblemonCompat.runPokeSpawnAt(level, spawnPos, entry.getEntityId());
 
             if (!commandExecuted) {
                 return false;
