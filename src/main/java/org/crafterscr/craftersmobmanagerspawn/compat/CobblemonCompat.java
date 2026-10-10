@@ -87,6 +87,12 @@ public class CobblemonCompat {
             if (data instanceof CompoundTag tag) {
                 if (!zoneId.equals(tag.getString(MANAGED_ZONE_DATA_KEY))) {
                     tag.putString(MANAGED_ZONE_DATA_KEY, zoneId);
+                    // En una zona 'deny', el spawn ya aplica uncatchable=yes.
+                    // Registrar que esa protección pertenece a MMSpawn permite
+                    // revertirla al ejecutar 'capture allow' posteriormente.
+                    if (denyCapture && Boolean.TRUE.equals(invokeNoArgs(pokemon, "isUncatchable"))) {
+                        tag.putBoolean(NATIVE_UNCATCHABLE_OWNED_KEY, true);
+                    }
                 }
                 synchronizeNativeCaptureProperty(pokemon, tag, denyCapture);
             }
@@ -129,7 +135,7 @@ public class CobblemonCompat {
         // fallar sin dejar el flag configurado.
         Object custom = invokeNoArgs(pokemon, "getCustomProperties");
         if (!(custom instanceof List<?> rawProperties)) {
-            throw new IllegalStateException("Cobblemon Pokemon.getCustomProperties() no devolvió List");
+            throw new ReflectiveOperationException("Cobblemon Pokemon.getCustomProperties() no devolvió List");
         }
         @SuppressWarnings("unchecked")
         List<Object> properties = (List<Object>) rawProperties;
