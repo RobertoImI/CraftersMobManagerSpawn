@@ -76,16 +76,6 @@ public class MMSpawnCommands {
                 .then(Commands.literal("debug")
                         .executes(context -> debug(context.getSource())))
 
-                .then(Commands.literal("capture")
-                        .then(Commands.argument("id", StringArgumentType.word())
-                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
-                                .then(Commands.literal("deny")
-                                        .executes(context -> setCaptureDenied(context.getSource(),
-                                                StringArgumentType.getString(context, "id"), true)))
-                                .then(Commands.literal("allow")
-                                        .executes(context -> setCaptureDenied(context.getSource(),
-                                                StringArgumentType.getString(context, "id"), false)))))
-
                 .then(Commands.literal("info")
                         .then(Commands.argument("id", StringArgumentType.word())
                                 .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
@@ -337,6 +327,15 @@ public class MMSpawnCommands {
                                         context.getSource(),
                                         StringArgumentType.getString(context, "id")
                                 ))))
+                .then(Commands.literal("capture")
+                        .then(Commands.argument("id", StringArgumentType.word())
+                                .suggests((context, builder) -> SharedSuggestionProvider.suggest(MMSpawnManager.getZoneIds(), builder))
+                                .then(Commands.literal("deny")
+                                        .executes(context -> setCaptureDenied(context.getSource(),
+                                                StringArgumentType.getString(context, "id"), true)))
+                                .then(Commands.literal("allow")
+                                        .executes(context -> setCaptureDenied(context.getSource(),
+                                                StringArgumentType.getString(context, "id"), false)))))
                 .then(createPokemonDropCommand());
     }
 
@@ -537,6 +536,7 @@ public class MMSpawnCommands {
         SpawnZone zone = getZoneOrFail(source, id);
         if (zone == null) return 0;
         zone.setCaptureDenied(deny);
+        MMSpawnManager.refreshZoneCaptureProtection(source.getServer(), zone);
         MMSpawnManager.save();
         success(source, (deny ? "Captura bloqueada" : "Captura permitida")
                 + " para los Pokémon administrados de la zona " + zone.getId() + ".");
