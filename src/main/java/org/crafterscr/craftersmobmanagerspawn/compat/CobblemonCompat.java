@@ -77,22 +77,77 @@ public class CobblemonCompat {
      * Marca únicamente el objeto Pokémon administrado; este dato persiste y
      * sigue con el Pokémon cuando Cobblemon recrea su entidad para un combate.
      */
-    public static void markManagedPokemonZone(Entity entity, String zoneId) {
+    public static void markManagedPokemonZone(Entity entity, String zoneId, boolean denyCapture) {
         if (entity == null || zoneId == null) {
             return;
         }
         try {
             Object pokemon = invokeNoArgs(entity, "getPokemon");
             Object data = invokeNoArgs(pokemon, "getPersistentData");
-            if (data instanceof CompoundTag tag && !zoneId.equals(tag.getString(MANAGED_ZONE_DATA_KEY))) {
-                tag.putString(MANAGED_ZONE_DATA_KEY, zoneId);
+            if (data instanceof CompoundTag tag) {
+                if (!zoneId.equals(tag.getString(MANAGED_ZONE_DATA_KEY))) {
+                    tag.putString(MANAGED_ZONE_DATA_KEY, zoneId);
+                }
+                synchronizeNativeCaptureProperty(pokemon, tag, denyCapture);
             }
         } catch (ReflectiveOperationException exception) {
             org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.warn(
-                    "MMSpawn: no se pudo marcar Pokémon de zona {} para protección de captura",
+                    "MMSpawn: no se pudo actualizar captura de Pokémon de zona {}",
                     zoneId, exception
             );
         }
+    }
+
+    /**
+     * Cobblemon comprueba 'uncatchable' ANTES de registrar BattleCaptureAction
+     * y forceChoose: así un lanzamiento durante batalla no bloquea el turno.
+     * Sólo retiramos la bandera si fue puesta por MMSpawn.
+     */
+    public static void synchronizeNativeCaptureProperty(Entity entity, boolean denyCapture) {
+        if (entity == null) {
+            return;
+        }
+        try {
+            Object pokemon = invokeNoArgs(entity, "getPokemon");
+            Object data = invokeNoArgs(pokemon, "getPersistentData");
+            if (data instanceof CompoundTag tag) {
+                synchronizeNativeCaptureProperty(pokemon, tag, denyCapture);
+            }
+        } catch (ReflectiveOperationException exception) {
+            org.crafterscr.craftersmobmanagerspawn.CraftersMobManagerSpawn.LOGGER.warn(
+                    "MMSpawn: no se pudo sincronizar la protección nativa de captura", exception);
+        }
+    }
+
+    private static final String NATIVE_UNCATCHABLE_OWNED_KEY = "crafterscr_mmspawn_uncatchable";
+
+    private static void synchronizeNativeCaptureProperty(Object pokemon, CompoundTag tag, boolean denied)
+            throws ReflectiveOperationException {
+        boolean appliedByUs = tag.getBoolean(NATIVE_UNCATCHABLE_OWNED_KEY);
+        Object nativeFlag = invokeNoArgs(pokemon, "isUncatchable");
+        boolean alreadyUncatchable = Boolean.TRUE.equals(nativeFlag);
+
+        if (denied && !alreadyUncatchable) {
+            updateNativeUncatchableFlag(pokemon, false);
+            tag.putBoolean(NATIVE_UNCATCHABLE_OWNED_KEY, true);
+        } else if (!denied && appliedByUs) {
+            updateNativeUncatchableFlag(pokemon, true);
+            tag.remove(NATIVE_UNCATCHABLE_OWNED_KEY);
+        }
+    }
+
+    /**
+     * 'uncatchable' es propiedad interna de Cobblemon 1.7. Sólo reflexión:
+     * CraftersMobManagerSpawn continúa siendo server-side y dependencia opcional.
+     */
+    private static void updateNativeUncatchableFlag(Object pokemon, boolean remove)
+            throws ReflectiveOperationException {
+        Class<?> nativeType = Class.forName(
+                "com.cobblemon.mod.common.pokemon.properties.UncatchableProperty");
+        Object nativeSingleton = nativeType.getField("INSTANCE").get(null);
+        Object flag = nativeType.getMethod(remove ? "catchable" : "uncatchable").invoke(nativeSingleton);
+        Class<?> pokemonType = Class.forName("com.cobblemon.mod.common.pokemon.Pokemon");
+        flag.getClass().getMethod("apply", pokemonType).invoke(flag, pokemon);
     }
 
     public static String getManagedZoneIdFromEntity(Entity entity) {
@@ -429,7 +484,14 @@ public class CobblemonCompat {
     private static void onThrownPokeBallHit(Object event) throws Exception {
         Object target = invokeNoArgs(event, "getPokemon");
         if (target instanceof Entity pokemonEntity && MMSpawnManager.isCaptureDenied(pokemonEntity)) {
-            // CancelableObservable detiene la captura antes de que comience.
+            // En batalla Cobblemon ya creó BattleCaptureAction ANTES de este
+            // evento. Cancelarlo aquí dejaría el turno bloqueado. La propiedad
+            // nativa 'uncatchable' lo evita antes de crear esa acción; si alguna
+            // versión llega hasta aquí, el cálculo posterior forzará un fallo
+            // normal que completará BattleCaptureAction y liberará el turno.
+            if (invokeNoArgs(pokemonEntity, "getBattleId") != null) {
+                return;
+            }
             invokeNoArgs(event, "cancel");
             sendCaptureDeniedToBallOwner(invokeNoArgs(event, "getPokeBall"));
         }
