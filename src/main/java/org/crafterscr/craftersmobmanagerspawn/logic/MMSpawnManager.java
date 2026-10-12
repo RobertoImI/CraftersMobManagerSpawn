@@ -1314,10 +1314,11 @@ public class MMSpawnManager {
                     // en creativo incluso si el inventario está lleno.
                     stack = insertRewardIntoInventory(player, stack);
 
-                    // Los sobrantes aparecen como drops públicos normales.
-                    // Guardamos el UUID del destinatario original en una etiqueta
-                    // persistente de la entidad SOLO para trazabilidad; NO usamos
-                    // setTarget/setOwner, pues restringirían quién puede recogerla.
+                    // Los sobrantes siguen siendo drops públicos normales.
+                    // La etiqueta identifica al destinatario original para trazabilidad.
+                    // setThrower(player) atribuye la entidad al ganador: el filtro
+                    // EntityJoinLevelEvent de ProteccionsCR respeta items con getOwner()
+                    // no nulo. No usamos setTarget para no restringir quién la recoge.
                     if (!stack.isEmpty()) {
                         ItemEntity overflow = new ItemEntity(
                                 player.serverLevel(),
@@ -1326,6 +1327,7 @@ public class MMSpawnManager {
                                 player.getZ(),
                                 stack.copy()
                         );
+                        overflow.setThrower(player);
                         overflow.addTag("mmspawn_reward_for_" + player.getUUID().toString().replace("-", ""));
                         // Da tiempo a que la entidad aparezca y evita su recogida
                         // inmediata al generarse sobre el jugador.
